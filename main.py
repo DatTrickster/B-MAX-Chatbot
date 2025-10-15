@@ -15,6 +15,11 @@ client = Client(
 
 app = FastAPI()
 
+@app.get("/")
+async def root():
+    return {"message": "AI Chatbot API is running!"}
+
+
 class ChatRequest(BaseModel):
     prompt: str
 
