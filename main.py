@@ -28,7 +28,7 @@ async def chat(request: ChatRequest):
     messages = [{'role': 'user', 'content': request.prompt}]
     response_text = ""
 
-    for part in client.chat('gpt-oss:120b', messages=messages, stream=True):
+    for part in client.chat('deepseek-r1:latest', messages=messages, stream=True):
         response_text += part['message']['content']
 
     return {"response": response_text}
