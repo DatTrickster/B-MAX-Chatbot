@@ -12,7 +12,9 @@ client = Client(
     host="https://ollama.com",
     headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"}
 )
-
+chat_context = [
+    {"role": "system", "content": "Hi, I'm B-Max! How can I assist?"}
+]
 app = FastAPI()
 
 @app.get("/")
@@ -25,11 +27,16 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    messages = [{'role': 'user', 'content': request.prompt}]
-    response_text = ""
+    # Add user's message to context
+    chat_context.append({"role": "user", "content": request.prompt})
 
-    for part in client.chat('deepseek-v3.1:671b-cloud', messages=messages, stream=True):
+    response_text = ""
+    # Send all messages so far to the AI
+    for part in client.chat('deepseek-v3.1:671b-cloud', messages=chat_context, stream=True):
         response_text += part['message']['content']
+
+    # Add AI's response to the context
+    chat_context.append({"role": "assistant", "content": response_text})
 
     return {"response": response_text}
 
