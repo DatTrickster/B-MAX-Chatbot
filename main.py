@@ -387,25 +387,25 @@ class UserSession:
         self.chat_context = []
         self.last_active = datetime.now()
         self.total_messages = 0
+        self.session_id = f"{user_id}_{int(time.time())}"
         
-        print(f"🎯 Creating session for user_id: {user_id}")
+        print(f"🎯 Creating NEW session for user_id: {user_id}")
         self.load_user_profile()
         
         first_name = self.get_first_name()
-        self.chat_context = [
-            {"role": "system", "content": self.create_system_prompt(first_name)}
-        ]
+        self.initialize_chat_context(first_name)
         
         print(f"✅ Session created - Name: {first_name}, Profile loaded: {self.user_profile is not None}")
 
-    def create_system_prompt(self, first_name: str):
+    def initialize_chat_context(self, first_name: str):
+        """Initialize or reinitialize chat context with system prompt"""
         # Get the embedded table for system context
         tenders = get_embedded_table()
         user_preferences = self.get_user_preferences()
         
         table_context = format_embedded_table_for_ai(tenders, user_preferences) if tenders else "Tender database not currently available."
         
-        return f"""You are B-Max, an AI assistant for TenderConnect. You have complete access to the tender database.
+        system_prompt = f"""You are B-Max, an AI assistant for TenderConnect. You have complete access to the tender database.
 
 CRITICAL RULES - FOLLOW THESE EXACTLY:
 1. ALWAYS address the user by their first name "{first_name}" in EVERY response
@@ -431,6 +431,13 @@ RESPONSE GUIDELINES:
 - Personalize recommendations based on user preferences
 - Use emojis sparingly to enhance readability
 - Never mention your capabilities or database access"""
+
+        # Set the chat context with system message only if empty
+        if not self.chat_context:
+            self.chat_context = [{"role": "system", "content": system_prompt}]
+        else:
+            # Update system message if context exists but system prompt might be outdated
+            self.chat_context[0] = {"role": "system", "content": system_prompt}
 
     def load_user_profile(self):
         """Load user profile using Cognito to get UUID, then UserProfiles table"""
@@ -534,31 +541,59 @@ RESPONSE GUIDELINES:
 
     def update_activity(self):
         self.last_active = datetime.now()
+        print(f"🕒 Session activity updated for {self.user_id}")
 
     def add_message(self, role, content):
+        """Add message to chat context with proper management"""
+        # Ensure system message is always first
+        if not self.chat_context or self.chat_context[0]["role"] != "system":
+            self.initialize_chat_context(self.get_first_name())
+        
         self.chat_context.append({"role": role, "content": content})
         self.total_messages += 1
         
         # Keep reasonable context length but preserve system message
-        if len(self.chat_context) > 16:
+        if len(self.chat_context) > 20:  # Increased context window
             system_message = self.chat_context[0]
-            recent_messages = self.chat_context[-15:]
+            recent_messages = self.chat_context[-19:]  # Keep 19 most recent + system
             self.chat_context = [system_message] + recent_messages
+        
+        print(f"💬 Added {role} message. Total messages: {self.total_messages}, Context length: {len(self.chat_context)}")
+
+    def get_chat_context(self):
+        """Get the current chat context, ensuring system message is present"""
+        if not self.chat_context or self.chat_context[0]["role"] != "system":
+            self.initialize_chat_context(self.get_first_name())
+        return self.chat_context
 
 def get_user_session(user_id: str) -> UserSession:
+    """Get or create user session with improved session management"""
     if user_id not in user_sessions:
         user_sessions[user_id] = UserSession(user_id)
-    user_sessions[user_id].update_activity()
-    return user_sessions[user_id]
+        print(f"🆕 Created new session for {user_id}. Total active sessions: {len(user_sessions)}")
+    else:
+        print(f"🔄 Reusing existing session for {user_id}")
+    
+    session = user_sessions[user_id]
+    session.update_activity()
+    return session
 
 def cleanup_old_sessions():
+    """Clean up sessions that haven't been active for 2 hours"""
     current_time = datetime.now()
     expired_users = []
+    
     for user_id, session in user_sessions.items():
-        if (current_time - session.last_active).total_seconds() > 7200:
+        inactivity_time = (current_time - session.last_active).total_seconds()
+        if inactivity_time > 7200:  # 2 hours
             expired_users.append(user_id)
+            print(f"🧹 Cleaning up expired session for {user_id} (inactive for {inactivity_time:.0f}s)")
+    
     for user_id in expired_users:
         del user_sessions[user_id]
+    
+    if expired_users:
+        print(f"🧹 Cleaned up {len(expired_users)} expired sessions. Remaining: {len(user_sessions)}")
 
 def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
     """Enhance prompt with embedded table context and personalization"""
@@ -629,6 +664,7 @@ async def root():
         "message": "B-Max AI Assistant",
         "status": "healthy" if ollama_available else "degraded",
         "embedded_tenders": tender_count,
+        "active_sessions": len(user_sessions),
         "timestamp": datetime.now().isoformat()
     }
 
@@ -637,11 +673,15 @@ async def health_check():
     tenders = get_embedded_table()
     tender_count = len(tenders) if tenders else 0
     
+    # Perform session cleanup on health check
+    cleanup_old_sessions()
+    
     return {
         "status": "ok",
         "service": "B-Max AI Assistant",
         "embedded_tenders": tender_count,
         "active_sessions": len(user_sessions),
+        "ollama_available": ollama_available,
         "timestamp": datetime.now().isoformat()
     }
 
@@ -651,14 +691,13 @@ async def chat(request: ChatRequest):
         if not ollama_available:
             raise HTTPException(status_code=503, detail="AI service temporarily unavailable")
         
-        cleanup_old_sessions()
-        
         print(f"💬 Chat request received - user_id: {request.user_id}, prompt: {request.prompt}")
         
         session = get_user_session(request.user_id)
         user_first_name = session.get_first_name()
         
-        print(f"🎯 Using session - First name: {user_first_name}")
+        print(f"🎯 Using session - First name: {user_first_name}, Total messages: {session.total_messages}")
+        print(f"📊 Current context length: {len(session.chat_context)}")
         
         # Enhance prompt with embedded table context
         enhanced_prompt = enhance_prompt_with_context(request.prompt, session)
@@ -666,11 +705,14 @@ async def chat(request: ChatRequest):
         # Add enhanced user message to context
         session.add_message("user", enhanced_prompt)
         
+        # Get the current chat context for the AI
+        chat_context = session.get_chat_context()
+        
         # Get AI response
         try:
             response = client.chat(
                 'deepseek-v3.1:671b-cloud', 
-                messages=session.chat_context
+                messages=chat_context
             )
             response_text = response['message']['content']
         except Exception as e:
@@ -680,7 +722,7 @@ async def chat(request: ChatRequest):
         # Add assistant response to context
         session.add_message("assistant", response_text)
         
-        print(f"✅ Response sent to {user_first_name}")
+        print(f"✅ Response sent to {user_first_name}. Total session messages: {session.total_messages}")
         
         return {
             "response": response_text,
@@ -688,7 +730,8 @@ async def chat(request: ChatRequest):
             "username": user_first_name,
             "full_name": session.get_display_name(),
             "timestamp": datetime.now().isoformat(),
-            "session_active": True
+            "session_active": True,
+            "total_messages": session.total_messages
         }
         
     except HTTPException:
@@ -697,17 +740,35 @@ async def chat(request: ChatRequest):
         print(f"❌ Chat error: {e}")
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
+@app.get("/session-info/{user_id}")
+async def get_session_info(user_id: str):
+    """Debug endpoint to check session state"""
+    if user_id in user_sessions:
+        session = user_sessions[user_id]
+        return {
+            "user_id": user_id,
+            "first_name": session.get_first_name(),
+            "total_messages": session.total_messages,
+            "context_length": len(session.chat_context),
+            "last_active": session.last_active.isoformat(),
+            "session_id": session.session_id
+        }
+    else:
+        return {"error": "Session not found"}
+
 # Initialize embedded table on startup
 @app.on_event("startup")
 async def startup_event():
     print("🚀 Initializing embedded tender table...")
     embed_tender_table()
+    print("✅ Startup complete")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     print("🚀 Starting B-Max AI Assistant...")
     print("💬 Endpoint: POST /chat")
     print("🔧 Health: GET /health")
+    print("🐛 Session Debug: GET /session-info/{user_id}")
     print("📊 Database:", "Connected" if dynamodb else "Disconnected")
     print("🤖 Ollama:", "Connected" if ollama_available else "Disconnected")
     print(f"🌐 Server running on port {port}")
