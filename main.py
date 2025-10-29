@@ -158,9 +158,12 @@ def get_cognito_user_by_username(username: str):
         for attr in response.get('UserAttributes', []):
             user_attributes[attr['Name']] = attr['Value']
         
+        # The UserSub is the UUID we need - this is the main identifier
+        user_sub = response.get('UserSub')
+        
         cognito_user = {
             'username': response.get('Username'),
-            'user_id': response.get('UserSub'),  # This is the UUID
+            'user_id': user_sub,  # This is the UUID that matches userId in UserProfiles
             'email': user_attributes.get('email'),
             'email_verified': user_attributes.get('email_verified', 'false') == 'true',
             'status': response.get('UserStatus'),
@@ -170,7 +173,7 @@ def get_cognito_user_by_username(username: str):
             'attributes': user_attributes
         }
         
-        print(f"✅ Found Cognito user: {username} -> UUID: {cognito_user['user_id']}")
+        print(f"✅ Found Cognito user: {username} -> UUID: {user_sub}")
         return cognito_user
         
     except Exception as e:
@@ -438,20 +441,21 @@ RESPONSE GUIDELINES:
 
             print(f"🔍 Loading profile for: {self.user_id}")
             
-            # Strategy 1: Check if user_id is already a UUID
-            if len(self.user_id) > 20:  # Likely a UUID
+            # Strategy 1: Check if user_id is already a UUID (starts with Cognito pattern)
+            if self.user_id.startswith(('us-east-', 'us-west-', 'af-south-')) or len(self.user_id) > 20:
+                # This might already be a UUID, try direct lookup
                 profile = get_user_profile_by_user_id(self.user_id)
                 if profile:
                     self.user_profile = profile
-                    print(f"✅ Profile found via UUID: {self.user_id}")
+                    print(f"✅ Profile found via direct UUID: {self.user_id}")
                     print(f"   firstName: {profile.get('firstName', 'NOT FOUND')}")
                     return
             
             # Strategy 2: Query Cognito to get UUID from username
-            print(f"🔍 Querying Cognito for: {self.user_id}")
+            print(f"🔍 Querying Cognito for username: {self.user_id}")
             self.cognito_user = get_cognito_user_by_username(self.user_id)
             
-            if self.cognito_user:
+            if self.cognito_user and self.cognito_user['user_id']:
                 cognito_uuid = self.cognito_user['user_id']
                 print(f"✅ Found Cognito UUID: {cognito_uuid} for username: {self.user_id}")
                 
@@ -462,13 +466,24 @@ RESPONSE GUIDELINES:
                     print(f"✅ Profile found via Cognito UUID: {cognito_uuid}")
                     print(f"   firstName: {profile.get('firstName', 'NOT FOUND')}")
                     return
+                else:
+                    print(f"❌ No UserProfiles entry found for Cognito UUID: {cognito_uuid}")
             
-            # Strategy 3: Try direct email lookup
+            # Strategy 3: Try direct email lookup in UserProfiles
             if '@' in self.user_id:
                 profile = get_user_profile_by_email(self.user_id)
                 if profile:
                     self.user_profile = profile
                     print(f"✅ Profile found via email: {self.user_id}")
+                    return
+            
+            # Strategy 4: If we have Cognito user but no profile, try email from Cognito
+            if self.cognito_user and self.cognito_user.get('email'):
+                cognito_email = self.cognito_user['email']
+                profile = get_user_profile_by_email(cognito_email)
+                if profile:
+                    self.user_profile = profile
+                    print(f"✅ Profile found via Cognito email: {cognito_email}")
                     return
             
             # If no profile found, use default
