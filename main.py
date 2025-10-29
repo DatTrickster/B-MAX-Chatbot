@@ -56,7 +56,7 @@ app = FastAPI(title="B-Max AI Assistant", version="1.0.0")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your frontend URL
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -76,7 +76,8 @@ class UserSession:
         self.chat_context = []
         self.last_active = datetime.now()
         self.greeted = False
-        self.bookmark_patterns = None
+        
+        print(f"🎯 Creating session for user_id: {user_id}")
         
         # Load user profile FIRST before creating system prompt
         self.load_user_profile()
@@ -88,7 +89,7 @@ class UserSession:
             {"role": "system", "content": self.create_system_prompt(username, first_name)}
         ]
         
-        print(f"🎯 Created session for: {first_name} ({username})")
+        print(f"✅ Session created - Name: {first_name}, Profile loaded: {self.user_profile is not None}")
 
     def create_system_prompt(self, username: str, first_name: str):
         company = self.user_profile.get('companyName', 'Unknown') if self.user_profile else 'Unknown'
@@ -107,23 +108,16 @@ class UserSession:
         
         return f"""You are B-Max, an AI assistant for TenderConnect. 
 
-CRITICAL RULES:
-1. ALWAYS address the user by their first name "{first_name}" in your responses
-2. Be warm, friendly, and professional
-3. Remember context from previous messages
-4. If you don't know something, be honest and say so
-5. Keep responses concise but informative
-6. Use emojis occasionally to make conversations friendly
-
-Your capabilities:
-- Answer questions about tenders and procurement
-- Provide information about tender categories and deadlines
-- Help users understand the TenderConnect platform
-- Provide personalized recommendations based on user preferences
+CRITICAL RULES - FOLLOW THESE EXACTLY:
+1. ALWAYS address the user by their first name "{first_name}" in EVERY response
+2. Never use "User" - always use "{first_name}"
+3. Be warm, friendly, and professional
+4. Remember context from previous messages
+5. If you don't know something, be honest and say so
 
 User Profile:
 - Full Name: {username}
-- First Name: {first_name} (USE THIS NAME IN ALL RESPONSES)
+- First Name: {first_name} (USE THIS IN ALL RESPONSES)
 - Company: {company}
 - Position: {position}
 - Location: {location}
@@ -131,25 +125,26 @@ User Profile:
 
 Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-IMPORTANT: Start your first response with a warm greeting that includes the user's first name "{first_name}". For example: "Hi {first_name}! 👋" or "Hello {first_name}! 😊""
+IMPORTANT: Start your first response with "Hi {first_name}! 👋" and always use their name in responses."""
 
     def load_user_profile(self):
-        """Load user profile from UserProfiles table using the correct schema"""
+        """Load user profile from UserProfiles table"""
         try:
             if dynamodb:
-                print(f"🔍 Loading profile for user: {self.user_id}")
+                print(f"🔍 Loading profile for userId: {self.user_id}")
                 response = dynamodb.get_item(
                     TableName=DYNAMODB_TABLE_USERS,
                     Key={'userId': {'S': self.user_id}}
                 )
                 if 'Item' in response:
                     self.user_profile = self.dynamodb_to_python_enhanced(response['Item'])
-                    print(f"✅ Loaded profile for user: {self.user_id}")
-                    print(f"   Name: {self.get_display_name()}")
-                    print(f"   First Name: {self.get_first_name()}")
-                    print(f"   Company: {self.user_profile.get('companyName', 'Unknown')}")
+                    print(f"✅ Profile loaded successfully for: {self.user_id}")
+                    print(f"   Available fields: {list(self.user_profile.keys())}")
+                    print(f"   firstName: {self.user_profile.get('firstName', 'NOT FOUND')}")
+                    print(f"   lastName: {self.user_profile.get('lastName', 'NOT FOUND')}")
+                    print(f"   companyName: {self.user_profile.get('companyName', 'NOT FOUND')}")
                 else:
-                    print(f"❌ No profile found for user: {self.user_id}")
+                    print(f"❌ No profile found in DynamoDB for userId: {self.user_id}")
                     self.user_profile = self.create_default_profile()
         except Exception as e:
             print(f"❌ Error loading user profile: {e}")
@@ -194,6 +189,7 @@ IMPORTANT: Start your first response with a warm greeting that includes the user
 
     def get_display_name(self):
         if self.user_profile:
+            # Use the exact field names from DynamoDB
             first_name = self.user_profile.get('firstName', 'User')
             last_name = self.user_profile.get('lastName', '')
             return f"{first_name} {last_name}".strip()
@@ -201,7 +197,7 @@ IMPORTANT: Start your first response with a warm greeting that includes the user
 
     def get_first_name(self):
         if self.user_profile:
-            # Get first name from profile, default to 'User'
+            # Use the exact field name from DynamoDB
             first_name = self.user_profile.get('firstName', 'User')
             return first_name
         return "User"
@@ -230,72 +226,6 @@ def cleanup_old_sessions():
     for user_id in expired_users:
         del user_sessions[user_id]
 
-def get_tender_information(query: str = None, user_id: str = None):
-    """Get tender information from database"""
-    try:
-        if not dynamodb:
-            return "Database currently unavailable"
-        
-        # Simple implementation for demo
-        response = dynamodb.scan(
-            TableName=DYNAMODB_TABLE_TENDERS,
-            Limit=3,
-            Select='SPECIFIC_ATTRIBUTES',
-            ProjectionExpression='title, Category, closingDate'
-        )
-        
-        items = response.get('Items', [])
-        if not items:
-            return "No tenders found in the database."
-        
-        tenders_info = []
-        for item in items:
-            tender = {}
-            for key, value in item.items():
-                if 'S' in value:
-                    tender[key] = value['S']
-            tenders_info.append(tender)
-        
-        return format_tenders_for_ai(tenders_info)
-        
-    except Exception as e:
-        return f"Error accessing database: {str(e)}"
-
-def format_tenders_for_ai(tenders):
-    if not tenders:
-        return "No tender data available."
-    
-    formatted = "Recent Tenders:\n"
-    for i, tender in enumerate(tenders, 1):
-        title = tender.get('title', 'Unknown Title')[:50] + '...' if len(tender.get('title', '')) > 50 else tender.get('title', 'Unknown Title')
-        category = tender.get('Category', 'Uncategorized')
-        closing_date = tender.get('closingDate', 'Unknown')
-        
-        formatted += f"{i}. {title}\n"
-        formatted += f"   Category: {category}\n"
-        formatted += f"   Closes: {closing_date}\n\n"
-    
-    return formatted
-
-def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
-    database_context = ""
-    tender_keywords = ['tender', 'tenders', 'procurement', 'bid', 'category']
-    
-    if any(keyword in user_prompt.lower() for keyword in tender_keywords):
-        database_context = get_tender_information(user_prompt, session.user_id)
-    
-    user_first_name = session.get_first_name()
-    
-    enhanced_prompt = f"""
-User: {user_first_name}
-Message: {user_prompt}
-
-{database_context if database_context else ""}
-
-Remember to address the user by their first name "{user_first_name}" in your response.
-"""
-    return enhanced_prompt
-
 @app.get("/")
 async def root():
     return {
@@ -315,7 +245,6 @@ async def health_check():
     ollama_status = "unavailable"
     if ollama_available:
         try:
-            # Simple test without streaming
             test_response = client.chat('deepseek-v3.1:671b-cloud', messages=[{"role": "user", "content": "Say OK"}])
             if test_response and test_response.get('message', {}).get('content'):
                 ollama_status = "healthy"
@@ -341,21 +270,21 @@ async def chat(request: ChatRequest):
         
         cleanup_old_sessions()
         
+        print(f"💬 Chat request received - user_id: {request.user_id}, prompt: {request.prompt}")
+        
         session = get_user_session(request.user_id)
         user_first_name = session.get_first_name()
         
-        print(f"🎯 Processing chat for: {user_first_name} (ID: {request.user_id})")
+        print(f"🎯 Using session - First name: {user_first_name}")
         
-        # For the first message, ensure we use a fresh context with the user's name
-        if len(session.chat_context) <= 1:  # Only system message
-            enhanced_prompt = f"Hello, my name is {user_first_name}. {request.prompt}"
-        else:
-            enhanced_prompt = enhance_prompt_with_context(request.prompt, session)
+        enhanced_prompt = f"""
+User: {user_first_name}
+Message: {request.prompt}
+
+Remember to address the user by their first name "{user_first_name}" in your response.
+"""
         
         session.add_message("user", enhanced_prompt)
-        
-        print(f"💬 {user_first_name}: {request.prompt}")
-        print(f"📋 Context messages: {len(session.chat_context)}")
         
         # Use non-streaming approach for better reliability
         try:
@@ -373,8 +302,7 @@ async def chat(request: ChatRequest):
         if not session.greeted:
             session.greeted = True
         
-        print(f"✅ B-Max responded to {user_first_name}")
-        print(f"💡 Response: {response_text[:100]}...")
+        print(f"✅ Response sent to {user_first_name}")
         
         return {
             "response": response_text,
@@ -389,4 +317,42 @@ async def chat(request: ChatRequest):
         raise
     except Exception as e:
         print(f"❌ Chat error: {e}")
-        raise HTTPException(status_code=500,
+        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
+
+@app.get("/session/{user_id}")
+async def get_session_info(user_id: str):
+    if user_id not in user_sessions:
+        return {"error": "Session not found"}
+    
+    session = user_sessions[user_id]
+    return {
+        "user_id": session.user_id,
+        "username": session.get_display_name(),
+        "first_name": session.get_first_name(),
+        "company": session.user_profile.get('companyName', 'Unknown') if session.user_profile else 'Unknown',
+        "position": session.user_profile.get('position', 'Unknown') if session.user_profile else 'Unknown',
+        "message_count": len(session.chat_context) - 1,
+        "last_active": session.last_active.isoformat(),
+        "profile_fields": list(session.user_profile.keys()) if session.user_profile else []
+    }
+
+@app.delete("/session/{user_id}")
+async def clear_session(user_id: str):
+    if user_id in user_sessions:
+        del user_sessions[user_id]
+        return {"message": "Session cleared successfully"}
+    return {"message": "Session not found"}
+
+if __name__ == "__main__":
+    print("🚀 Starting B-Max AI Assistant...")
+    print("💬 Endpoint: POST /chat")
+    print("🔧 Health: GET /health")
+    print("📊 Database:", "Connected" if dynamodb else "Disconnected")
+    print("🤖 Ollama:", "Connected" if ollama_available else "Disconnected")
+    
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=int(os.getenv("PORT", 8000)),
+        access_log=True
+    )
