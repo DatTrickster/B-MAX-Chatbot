@@ -83,37 +83,57 @@ class UserSession:
         
         # Set up system prompt
         username = self.get_display_name()
+        first_name = self.get_first_name()
         self.chat_context = [
-            {"role": "system", "content": self.create_system_prompt(username)}
+            {"role": "system", "content": self.create_system_prompt(username, first_name)}
         ]
 
-    def create_system_prompt(self, username):
+    def create_system_prompt(self, username: str, first_name: str):
+        company = self.user_profile.get('companyName', 'Unknown') if self.user_profile else 'Unknown'
+        position = self.user_profile.get('position', 'Unknown') if self.user_profile else 'Unknown'
+        location = self.user_profile.get('location', 'Unknown') if self.user_profile else 'Unknown'
+        
+        # Get preferred categories if available
+        preferred_categories = []
+        if self.user_profile and 'preferredCategories' in self.user_profile:
+            if isinstance(self.user_profile['preferredCategories'], list):
+                preferred_categories = self.user_profile['preferredCategories']
+            elif isinstance(self.user_profile['preferredCategories'], set):
+                preferred_categories = list(self.user_profile['preferredCategories'])
+        
+        categories_str = ", ".join(preferred_categories) if preferred_categories else "Not specified"
+        
         return f"""You are B-Max, an AI assistant for TenderConnect. 
 
 IMPORTANT RULES:
 1. Always be respectful, professional, and helpful
 2. Remember context from previous messages
-3. Personalize responses using the user's name: {username}
+3. Personalize responses using the user's first name: {first_name}
 4. If you don't know something, be honest and say so
 5. Keep responses concise but informative
-6. Use emojis occasionally
+6. Use emojis occasionally to make conversations friendly
+7. Always address the user by their first name in responses
 
 Your capabilities:
 - Answer questions about tenders and procurement
 - Provide information about tender categories and deadlines
 - Help users understand the TenderConnect platform
+- Provide personalized recommendations based on user preferences
 
 User Profile:
-- Name: {username}
-- Company: {self.user_profile.get('companyName', 'Unknown') if self.user_profile else 'Unknown'}
-- Position: {self.user_profile.get('position', 'Unknown') if self.user_profile else 'Unknown'}
+- Full Name: {username}
+- First Name: {first_name}
+- Company: {company}
+- Position: {position}
+- Location: {location}
+- Preferred Categories: {categories_str}
 
 Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-Start by greeting the user warmly using their first name."""
+Start by greeting the user warmly using their first name: {first_name}."""
 
     def load_user_profile(self):
-        """Load user profile from UserProfiles table"""
+        """Load user profile from UserProfiles table using the correct schema"""
         try:
             if dynamodb:
                 response = dynamodb.get_item(
@@ -121,8 +141,10 @@ Start by greeting the user warmly using their first name."""
                     Key={'userId': {'S': self.user_id}}
                 )
                 if 'Item' in response:
-                    self.user_profile = dynamodb_to_python(response['Item'])
+                    self.user_profile = self.dynamodb_to_python_enhanced(response['Item'])
                     print(f"📋 Loaded profile for user: {self.user_id}")
+                    print(f"   Name: {self.get_display_name()}")
+                    print(f"   Company: {self.user_profile.get('companyName', 'Unknown')}")
                 else:
                     print(f"❌ No profile found for user: {self.user_id}")
                     self.user_profile = self.create_default_profile()
@@ -130,13 +152,38 @@ Start by greeting the user warmly using their first name."""
             print(f"❌ Error loading user profile: {e}")
             self.user_profile = self.create_default_profile()
 
+    def dynamodb_to_python_enhanced(self, item):
+        """Enhanced DynamoDB to Python conversion that handles all attribute types"""
+        result = {}
+        for key, value in item.items():
+            if 'S' in value:
+                result[key] = value['S']
+            elif 'N' in value:
+                result[key] = float(value['N']) if '.' in value['N'] else int(value['N'])
+            elif 'BOOL' in value:
+                result[key] = value['BOOL']
+            elif 'M' in value:
+                result[key] = self.dynamodb_to_python_enhanced(value['M'])
+            elif 'L' in value:
+                result[key] = [self.dynamodb_to_python_enhanced({'item': item})['item'] for item in value['L']]
+            elif 'SS' in value:
+                result[key] = list(value['SS'])  # String Set
+            elif 'NS' in value:
+                result[key] = [float(n) if '.' in n else int(n) for n in value['NS']]  # Number Set
+            elif 'BS' in value:
+                result[key] = list(value['BS'])  # Binary Set
+            elif 'NULL' in value and value['NULL']:
+                result[key] = None
+        return result
+
     def create_default_profile(self):
         return {
             'firstName': 'User',
             'lastName': '',
             'companyName': 'Unknown',
             'position': 'User',
-            'location': 'Unknown'
+            'location': 'Unknown',
+            'preferredCategories': []
         }
 
     def get_display_name(self):
@@ -242,6 +289,7 @@ Please respond helpfully and personally to {user_first_name}.
     return enhanced_prompt
 
 def dynamodb_to_python(item):
+    """Legacy function for backward compatibility"""
     result = {}
     for key, value in item.items():
         if 'S' in value:
@@ -317,7 +365,7 @@ async def chat(request: ChatRequest):
             response_text = response['message']['content']
         except Exception as e:
             print(f"❌ Ollama API error: {e}")
-            response_text = "I apologize, but I'm having trouble processing your request right now. Please try again in a moment."
+            response_text = f"I apologize {user_first_name}, but I'm having trouble processing your request right now. Please try again in a moment."
         
         session.add_message("assistant", response_text)
         
@@ -330,6 +378,7 @@ async def chat(request: ChatRequest):
             "response": response_text,
             "user_id": request.user_id,
             "username": user_first_name,
+            "full_name": session.get_display_name(),
             "timestamp": datetime.now().isoformat(),
             "session_active": True
         }
@@ -350,6 +399,8 @@ async def get_session_info(user_id: str):
         "user_id": session.user_id,
         "username": session.get_display_name(),
         "first_name": session.get_first_name(),
+        "company": session.user_profile.get('companyName', 'Unknown') if session.user_profile else 'Unknown',
+        "position": session.user_profile.get('position', 'Unknown') if session.user_profile else 'Unknown',
         "message_count": len(session.chat_context) - 1,
         "last_active": session.last_active.isoformat(),
     }
