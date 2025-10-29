@@ -11,6 +11,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Predefined Categories
+CATEGORIES = [
+    "Engineering Services", "IT Services", "Construction", "Consulting",
+    "Supplies", "Maintenance", "Logistics", "Healthcare"
+]
+
 # AWS Configuration
 AWS_REGION = os.getenv("AWS_REGION", "af-south-1")
 DYNAMODB_TABLE_TENDERS = os.getenv("DYNAMODB_TABLE_DEST", "ProcessedTender")
@@ -241,7 +247,7 @@ def get_tender_information(query: str = None, user_id: str = None):
         # Get all relevant tender fields
         response = dynamodb.scan(
             TableName=DYNAMODB_TABLE_TENDERS,
-            Limit=10,  # Increased limit to get more tenders
+            Limit=10,
             Select='SPECIFIC_ATTRIBUTES',
             ProjectionExpression='title, Category, closingDate, sourceAgency, status, link, referenceNumber, contactEmail, contactName, contactNumber, sourceUrl'
         )
@@ -307,16 +313,37 @@ def format_tenders_for_ai(tenders):
     return formatted
 
 def search_tenders_by_category(category: str):
-    """Search tenders by category"""
+    """Search tenders by predefined category"""
     try:
         if not dynamodb:
             return None
             
+        # Map category keywords to predefined categories
+        category_mapping = {
+            'engineering': 'Engineering Services',
+            'it': 'IT Services',
+            'technology': 'IT Services',
+            'construction': 'Construction',
+            'consulting': 'Consulting',
+            'supplies': 'Supplies',
+            'goods': 'Supplies',
+            'maintenance': 'Maintenance',
+            'logistics': 'Logistics',
+            'healthcare': 'Healthcare',
+            'medical': 'Healthcare'
+        }
+        
+        # Normalize category input
+        search_category = category.lower()
+        mapped_category = category_mapping.get(search_category, category)
+        
+        print(f"🔍 Searching tenders for category: {category} -> mapped to: {mapped_category}")
+            
         response = dynamodb.scan(
             TableName=DYNAMODB_TABLE_TENDERS,
             FilterExpression="contains(Category, :cat)",
-            ExpressionAttributeValues={":cat": {"S": category}},
-            Limit=5
+            ExpressionAttributeValues={":cat": {"S": mapped_category}},
+            Limit=8
         )
         
         items = response.get('Items', [])
@@ -328,6 +355,7 @@ def search_tenders_by_category(category: str):
                     tender[key] = value['S']
             tenders.append(tender)
         
+        print(f"✅ Found {len(tenders)} tenders for category: {mapped_category}")
         return tenders
     except Exception as e:
         print(f"❌ Error searching tenders by category: {e}")
@@ -360,6 +388,32 @@ def search_tenders_by_keyword(keyword: str):
         print(f"❌ Error searching tenders by keyword: {e}")
         return None
 
+def get_tenders_by_multiple_categories(categories: list):
+    """Get tenders that match any of the specified categories"""
+    try:
+        if not dynamodb:
+            return None
+            
+        all_tenders = []
+        for category in categories:
+            tenders = search_tenders_by_category(category)
+            if tenders:
+                all_tenders.extend(tenders)
+        
+        # Remove duplicates based on tenderId
+        seen_ids = set()
+        unique_tenders = []
+        for tender in all_tenders:
+            tender_id = tender.get('tenderId') or tender.get('tender_id')
+            if tender_id and tender_id not in seen_ids:
+                seen_ids.add(tender_id)
+                unique_tenders.append(tender)
+        
+        return unique_tenders[:10]  # Return max 10 tenders
+    except Exception as e:
+        print(f"❌ Error getting tenders by multiple categories: {e}")
+        return None
+
 class UserSession:
     def __init__(self, user_id):
         self.user_id = user_id
@@ -368,6 +422,7 @@ class UserSession:
         self.chat_context = []
         self.last_active = datetime.now()
         self.greeted = False
+        self.total_messages = 0
         
         print(f"🎯 Creating session for user_id: {user_id}")
         
@@ -396,7 +451,11 @@ class UserSession:
             elif isinstance(self.user_profile['preferredCategories'], set):
                 preferred_categories = list(self.user_profile['preferredCategories'])
         
-        categories_str = ", ".join(preferred_categories) if preferred_categories else "Not specified"
+        # Filter preferred categories to only include valid ones from our predefined list
+        valid_preferred_categories = [cat for cat in preferred_categories if cat in CATEGORIES]
+        categories_str = ", ".join(valid_preferred_categories) if valid_preferred_categories else "Not specified"
+        
+        available_categories_str = ", ".join(CATEGORIES)
         
         return f"""You are B-Max, an AI assistant for TenderConnect. 
 
@@ -404,7 +463,7 @@ CRITICAL RULES - FOLLOW THESE EXACTLY:
 1. ALWAYS address the user by their first name "{first_name}" in EVERY response
 2. Never use "User" or the username - always use "{first_name}"
 3. Be warm, friendly, and professional
-4. Remember context from previous messages
+4. Remember context from previous messages in this conversation
 5. If you don't know something, be honest and say so
 6. Use emojis occasionally to make conversations friendly
 7. Keep responses concise but informative
@@ -415,6 +474,11 @@ CRITICAL RULES - FOLLOW THESE EXACTLY:
 12. Use the user's preferences to personalize tender recommendations when appropriate
 13. ALWAYS include specific tender details like title, reference number, closing date, agency, and links when discussing tenders
 14. Make tender information easy to read with clear formatting
+15. Maintain conversation context and refer back to previous discussions when relevant
+16. Use the predefined categories when discussing tender types: {available_categories_str}
+
+AVAILABLE TENDER CATEGORIES:
+{available_categories_str}
 
 User Profile (FOR CONTEXT ONLY - DO NOT SHARE):
 - First Name: {first_name} (USE THIS IN ALL RESPONSES)
@@ -430,6 +494,8 @@ Your capabilities:
 - Help with tender search strategies
 - Provide information about tender deadlines and procedures
 - Search and present specific tender opportunities with all relevant details
+- Remember previous conversations and maintain context
+- Search tenders by specific categories: {available_categories_str}
 
 Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
@@ -438,6 +504,8 @@ IMPORTANT:
 - Always use "{first_name}" but don't force it into every sentence
 - Focus on providing helpful tender information and recommendations
 - When discussing tenders, include key details: title, reference number, category, agency, closing date, status, and links
+- Remember the full conversation history and refer back to it when appropriate
+- Use the predefined categories when categorizing tenders
 - Never discuss other users or their data
 - Keep responses professional and tender-focused"""
 
@@ -536,13 +604,40 @@ IMPORTANT:
         self.last_active = datetime.now()
 
     def add_message(self, role, content):
+        """Add message to chat context with smarter context management"""
         self.chat_context.append({"role": role, "content": content})
-        if len(self.chat_context) > 15:
-            self.chat_context = [self.chat_context[0]] + self.chat_context[-14:]
+        self.total_messages += 1
+        
+        # Smarter context management - keep more context for better conversations
+        # Keep system message + last 20 messages (increased from 15)
+        if len(self.chat_context) > 21:  # 1 system message + 20 conversation turns
+            # Always keep the system message
+            system_message = self.chat_context[0]
+            # Keep the most recent messages
+            recent_messages = self.chat_context[-20:]
+            self.chat_context = [system_message] + recent_messages
+        
+        print(f"💬 Message added - Role: {role}, Total messages: {self.total_messages}, Context length: {len(self.chat_context)}")
+
+    def get_context_summary(self):
+        """Get a summary of the conversation context for debugging"""
+        return {
+            "user_id": self.user_id,
+            "total_messages": self.total_messages,
+            "context_length": len(self.chat_context),
+            "last_active": self.last_active.isoformat(),
+            "user_profile_loaded": self.user_profile is not None
+        }
 
 def get_user_session(user_id: str) -> UserSession:
     if user_id not in user_sessions:
         user_sessions[user_id] = UserSession(user_id)
+    else:
+        print(f"🔄 Reusing existing session for: {user_id}")
+        # Print session info for debugging
+        session_info = user_sessions[user_id].get_context_summary()
+        print(f"📊 Session info: {session_info}")
+    
     user_sessions[user_id].update_activity()
     return user_sessions[user_id]
 
@@ -550,39 +645,50 @@ def cleanup_old_sessions():
     current_time = datetime.now()
     expired_users = []
     for user_id, session in user_sessions.items():
-        if (current_time - session.last_active).total_seconds() > 7200:
+        if (current_time - session.last_active).total_seconds() > 7200:  # 2 hours
             expired_users.append(user_id)
     for user_id in expired_users:
+        print(f"🧹 Cleaning up expired session for: {user_id}")
         del user_sessions[user_id]
 
 def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
     """Enhance user prompt with tender context and personalization"""
     database_context = ""
-    tender_keywords = ['tender', 'tenders', 'procurement', 'bid', 'category', 'recommend', 'suggest', 'opportunity', 'RFP', 'RFQ', 'construction', 'IT', 'services', 'supply']
     
-    # Check for specific category searches
+    # Enhanced category mapping with predefined categories
     category_keywords = {
-        'construction': ['construction', 'building', 'civil', 'engineering', 'infrastructure'],
-        'IT': ['IT', 'technology', 'software', 'hardware', 'computer', 'digital'],
-        'services': ['services', 'consulting', 'maintenance', 'cleaning', 'security'],
-        'supply': ['supply', 'goods', 'materials', 'equipment']
+        'Engineering Services': ['engineering', 'engineer', 'technical', 'design', 'infrastructure'],
+        'IT Services': ['IT', 'technology', 'software', 'hardware', 'computer', 'digital', 'tech', 'programming'],
+        'Construction': ['construction', 'building', 'civil', 'contractor', 'build', 'renovation'],
+        'Consulting': ['consulting', 'consultant', 'advisory', 'strategy', 'management'],
+        'Supplies': ['supplies', 'supply', 'goods', 'materials', 'equipment', 'products'],
+        'Maintenance': ['maintenance', 'repair', 'service', 'upkeep', 'support'],
+        'Logistics': ['logistics', 'transport', 'shipping', 'delivery', 'supply chain'],
+        'Healthcare': ['healthcare', 'medical', 'health', 'hospital', 'clinic', 'pharmaceutical']
     }
     
     user_prompt_lower = user_prompt.lower()
     
+    # Check for specific category searches
+    matched_categories = []
+    for category, keywords in category_keywords.items():
+        if any(keyword in user_prompt_lower for keyword in keywords):
+            matched_categories.append(category)
+    
     # Add tender context if the message is tender-related
-    if any(keyword in user_prompt_lower for keyword in tender_keywords):
-        # Check for specific category searches
-        specific_tenders = None
-        for category, keywords in category_keywords.items():
-            if any(keyword in user_prompt_lower for keyword in keywords):
-                specific_tenders = search_tenders_by_category(category)
-                if specific_tenders:
-                    database_context = format_tenders_for_ai(specific_tenders)
-                    break
-        
-        # If no specific category found, get general tenders
-        if not specific_tenders:
+    tender_keywords = ['tender', 'tenders', 'procurement', 'bid', 'category', 'recommend', 'suggest', 'opportunity', 'RFP', 'RFQ']
+    
+    if any(keyword in user_prompt_lower for keyword in tender_keywords) or matched_categories:
+        if matched_categories:
+            # Search for tenders in matched categories
+            specific_tenders = get_tenders_by_multiple_categories(matched_categories)
+            if specific_tenders:
+                database_context = format_tenders_for_ai(specific_tenders)
+                database_context = f"🔍 Tenders in categories: {', '.join(matched_categories)}\n\n{database_context}"
+            else:
+                database_context = f"📊 No specific tenders found for categories: {', '.join(matched_categories)}. Here are recent tenders instead:\n\n{get_tender_information()}"
+        else:
+            # Get general tenders
             database_context = get_tender_information(user_prompt, session.user_id)
     
     user_first_name = session.get_first_name()
@@ -593,9 +699,13 @@ Message: {user_prompt}
 
 {database_context if database_context else ""}
 
+Available Categories: {", ".join(CATEGORIES)}
+
 Remember to address the user by their first name "{user_first_name}" naturally in your response.
 Focus on providing helpful tender information and recommendations.
 When discussing tenders, include specific details like title, reference number, closing date, and links.
+Maintain conversation context and refer back to previous discussions when relevant.
+Use the predefined categories when discussing tender types.
 """
     return enhanced_prompt
 
@@ -607,7 +717,8 @@ async def root():
         "message": "B-Max AI Assistant API is running!",
         "status": "healthy" if ollama_available else "degraded",
         "cognito_enabled": cognito is not None,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "categories": CATEGORIES
     }
 
 @app.get("/health")
@@ -619,7 +730,16 @@ async def health_check():
         "cognito": "connected" if cognito else "disabled",
         "ollama": "connected" if ollama_available else "disconnected",
         "active_sessions": len(user_sessions),
+        "categories": CATEGORIES,
         "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/categories")
+async def get_categories():
+    """Get all available tender categories"""
+    return {
+        "categories": CATEGORIES,
+        "count": len(CATEGORIES)
     }
 
 @app.post("/chat")
@@ -636,6 +756,7 @@ async def chat(request: ChatRequest):
         user_first_name = session.get_first_name()
         
         print(f"🎯 Using session - First name: {user_first_name}")
+        print(f"📊 Current context length: {len(session.chat_context)} messages")
         
         # Enhance prompt with tender context if relevant
         enhanced_prompt = enhance_prompt_with_context(request.prompt, session)
@@ -645,6 +766,7 @@ async def chat(request: ChatRequest):
         
         # Get AI response
         try:
+            print(f"🤖 Sending to Ollama - Context length: {len(session.chat_context)}")
             response = client.chat(
                 'deepseek-v3.1:671b-cloud', 
                 messages=session.chat_context
@@ -658,6 +780,7 @@ async def chat(request: ChatRequest):
         session.add_message("assistant", response_text)
         
         print(f"✅ Response sent to {user_first_name}")
+        print(f"📈 Session stats - Total messages: {session.total_messages}, Context length: {len(session.chat_context)}")
         
         return {
             "response": response_text,
@@ -665,7 +788,11 @@ async def chat(request: ChatRequest):
             "username": user_first_name,
             "full_name": session.get_display_name(),
             "timestamp": datetime.now().isoformat(),
-            "session_active": True
+            "session_active": True,
+            "session_stats": {
+                "total_messages": session.total_messages,
+                "context_length": len(session.chat_context)
+            }
         }
         
     except HTTPException:
@@ -686,16 +813,43 @@ async def get_session_info(user_id: str):
         "first_name": session.get_first_name(),
         "company": session.user_profile.get('companyName', 'Unknown') if session.user_profile else 'Unknown',
         "position": session.user_profile.get('position', 'Unknown') if session.user_profile else 'Unknown',
-        "message_count": len(session.chat_context) - 1,
-        "last_active": session.last_active.isoformat()
+        "message_count": session.total_messages,
+        "context_length": len(session.chat_context),
+        "last_active": session.last_active.isoformat(),
+        "session_info": session.get_context_summary()
     }
 
 @app.delete("/session/{user_id}")
 async def clear_session(user_id: str):
     if user_id in user_sessions:
+        session_info = user_sessions[user_id].get_context_summary()
         del user_sessions[user_id]
-        return {"message": "Session cleared successfully"}
+        return {
+            "message": "Session cleared successfully",
+            "cleared_session": session_info
+        }
     return {"message": "Session not found"}
+
+@app.post("/session/{user_id}/clear-context")
+async def clear_chat_context(user_id: str):
+    """Clear the chat context but keep the session"""
+    if user_id in user_sessions:
+        session = user_sessions[user_id]
+        old_context_length = len(session.chat_context)
+        
+        # Reset to just system message
+        first_name = session.get_first_name()
+        system_prompt = session.create_system_prompt(session.get_display_name(), first_name)
+        session.chat_context = [{"role": "system", "content": system_prompt}]
+        session.total_messages = 0
+        
+        return {
+            "message": "Chat context cleared successfully",
+            "user_id": user_id,
+            "old_context_length": old_context_length,
+            "new_context_length": len(session.chat_context)
+        }
+    return {"error": "Session not found"}
 
 # Debug endpoints
 @app.get("/api/cognito-user/{username}")
@@ -799,6 +953,7 @@ if __name__ == "__main__":
     print("📊 Database:", "Connected" if dynamodb else "Disconnected")
     print("🔐 Cognito:", "Connected" if cognito else "Disabled")
     print("🤖 Ollama:", "Connected" if ollama_available else "Disconnected")
+    print("📋 Available Categories:", ", ".join(CATEGORIES))
     print(f"🌐 Server running on port {port}")
     
     uvicorn.run(app, host="0.0.0.0", port=port)
