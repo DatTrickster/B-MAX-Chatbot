@@ -3,6 +3,7 @@ import uvicorn
 import json
 import boto3
 import time
+import re
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -180,6 +181,86 @@ def get_cognito_user_by_username(username: str):
         print(f"❌ Error fetching Cognito user {username}: {e}")
         return None
 
+# --- Document Link Extraction Functions ---
+def extract_document_links(tender):
+    """Extract all document links from a tender"""
+    links = []
+    
+    # Check common fields that might contain document links
+    link_fields = ['documentLink', 'documents', 'tenderDocuments', 'bidDocuments', 
+                   'attachmentLinks', 'relatedDocuments', 'sourceUrl', 'tenderUrl',
+                   'document_url', 'bid_documents', 'tender_documents', 'attachments']
+    
+    for field in link_fields:
+        if field in tender and tender[field]:
+            # Handle both string and list types
+            field_value = tender[field]
+            if isinstance(field_value, list):
+                for item in field_value:
+                    if isinstance(item, str) and item.strip():
+                        links.append({
+                            'type': field,
+                            'url': item.strip()
+                        })
+            elif isinstance(field_value, str) and field_value.strip():
+                links.append({
+                    'type': field,
+                    'url': field_value.strip()
+                })
+    
+    # Also check for links in description or other text fields
+    text_fields = ['description', 'title', 'additionalInfo', 'noticeDetails', 'details']
+    for field in text_fields:
+        if field in tender and tender[field]:
+            url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+'
+            found_links = re.findall(url_pattern, str(tender[field]))
+            for link in found_links:
+                # Ensure proper URL format
+                if not link.startswith(('http://', 'https://')):
+                    link = 'https://' + link
+                if link not in [l['url'] for l in links]:
+                    links.append({
+                        'type': f'found_in_{field}',
+                        'url': link
+                    })
+    
+    return links
+
+def format_tender_with_links(tender):
+    """Format tender information with proper document links"""
+    title = tender.get('title', 'No title')
+    reference = tender.get('referenceNumber', 'N/A')
+    category = tender.get('Category', 'Unknown')
+    agency = tender.get('sourceAgency', 'Unknown')
+    closing_date = tender.get('closingDate', 'Unknown')
+    status = tender.get('status', 'Unknown')
+    
+    # Extract document links
+    document_links = extract_document_links(tender)
+    
+    formatted = f"**{title}**\n"
+    formatted += f"• **Reference**: {reference}\n"
+    formatted += f"• **Category**: {category}\n"
+    formatted += f"• **Agency**: {agency}\n"
+    formatted += f"• **Closing Date**: {closing_date}\n"
+    formatted += f"• **Status**: {status}\n"
+    
+    if document_links:
+        formatted += f"• **Document Links**:\n"
+        for i, link_info in enumerate(document_links, 1):
+            link_type = link_info['type'].replace('_', ' ').title()
+            url = link_info['url']
+            formatted += f"  {i}. [{link_type}]({url})\n"
+    else:
+        formatted += f"• **Document Links**: No direct links available\n"
+    
+    # Add source URL if available
+    source_url = tender.get('sourceUrl') or tender.get('tenderUrl')
+    if source_url and source_url not in [l['url'] for l in document_links]:
+        formatted += f"• **Source**: [View Original]({source_url})\n"
+    
+    return formatted
+
 def embed_tender_table():
     """Embed the entire ProcessedTender table into memory for AI context"""
     global embedded_tender_table, last_table_update
@@ -219,11 +300,12 @@ def embed_tender_table():
         
         print(f"✅ Embedded {len(all_tenders)} tenders from ProcessedTender table into AI context")
         
-        # Log table statistics
+        # Log table statistics including document links
         if all_tenders:
             categories = {}
             agencies = {}
             statuses = {}
+            tenders_with_links = 0
             
             for tender in all_tenders:
                 category = tender.get('Category', 'Unknown')
@@ -233,8 +315,13 @@ def embed_tender_table():
                 categories[category] = categories.get(category, 0) + 1
                 agencies[agency] = agencies.get(agency, 0) + 1
                 statuses[status] = statuses.get(status, 0) + 1
+                
+                # Count tenders with document links
+                if extract_document_links(tender):
+                    tenders_with_links += 1
             
             print(f"📊 ProcessedTender Table Stats - Categories: {len(categories)}, Agencies: {len(agencies)}, Statuses: {len(statuses)}")
+            print(f"🔗 Tenders with document links: {tenders_with_links}/{len(all_tenders)} ({tenders_with_links/len(all_tenders)*100:.1f}%)")
         
         return all_tenders
         
@@ -267,6 +354,7 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
     categories = {}
     agencies = {}
     statuses = {}
+    tenders_with_links = 0
     
     for tender in tenders:
         category = tender.get('Category', 'Unknown')
@@ -276,12 +364,17 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
         categories[category] = categories.get(category, 0) + 1
         agencies[agency] = agencies.get(agency, 0) + 1
         statuses[status] = statuses.get(status, 0) + 1
+        
+        # Count tenders with document links
+        if extract_document_links(tender):
+            tenders_with_links += 1
     
     table_summary += f"📊 DATABASE OVERVIEW:\n"
     table_summary += f"• Total Tenders: {total_tenders}\n"
     table_summary += f"• Categories: {len(categories)}\n"
     table_summary += f"• Agencies: {len(agencies)}\n"
-    table_summary += f"• Statuses: {len(statuses)}\n\n"
+    table_summary += f"• Statuses: {len(statuses)}\n"
+    table_summary += f"• Tenders with Document Links: {tenders_with_links} ({tenders_with_links/total_tenders*100:.1f}%)\n\n"
     
     # Add user preferences context if available
     if user_preferences:
@@ -302,22 +395,31 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
     
     table_summary += "\n"
     
-    # Sample tenders with key information
-    table_summary += "📋 SAMPLE TENDERS:\n"
-    for i, tender in enumerate(tenders[:8], 1):
-        title = tender.get('title', 'No title')[:80] + '...' if len(tender.get('title', '')) > 80 else tender.get('title', 'No title')
-        category = tender.get('Category', 'Unknown')
-        agency = tender.get('sourceAgency', 'Unknown')
-        closing_date = tender.get('closingDate', 'Unknown')
-        status = tender.get('status', 'Unknown')
-        reference_number = tender.get('referenceNumber', 'N/A')
-        
-        table_summary += f"{i}. {title}\n"
-        table_summary += f"   📊 {category} | 🏢 {agency}\n"
-        table_summary += f"   📅 {closing_date} | 📈 {status}\n"
-        table_summary += f"   🏷️ {reference_number}\n\n"
+    # Sample tenders with key information and document links
+    table_summary += "📋 SAMPLE TENDERS WITH DOCUMENT LINKS:\n"
+    sample_count = 0
+    for tender in tenders:
+        if sample_count >= 6:  # Show up to 6 sample tenders
+            break
+            
+        document_links = extract_document_links(tender)
+        if document_links:  # Only show tenders that have document links
+            title = tender.get('title', 'No title')[:80] + '...' if len(tender.get('title', '')) > 80 else tender.get('title', 'No title')
+            category = tender.get('Category', 'Unknown')
+            agency = tender.get('sourceAgency', 'Unknown')
+            closing_date = tender.get('closingDate', 'Unknown')
+            status = tender.get('status', 'Unknown')
+            reference_number = tender.get('referenceNumber', 'N/A')
+            
+            table_summary += f"{sample_count + 1}. {title}\n"
+            table_summary += f"   📊 {category} | 🏢 {agency}\n"
+            table_summary += f"   📅 {closing_date} | 📈 {status}\n"
+            table_summary += f"   🏷️ {reference_number}\n"
+            table_summary += f"   🔗 {len(document_links)} document link(s) available\n\n"
+            sample_count += 1
     
     table_summary += "💡 You have access to all tender data including titles, references, categories, agencies, closing dates, contacts, and document links."
+    table_summary += "\n\n📝 INSTRUCTION FOR DOCUMENT LINKS: When users ask for document links or tender documents, ALWAYS provide the actual clickable URLs in Markdown format like [Document Name](https://example.com/document.pdf). Do not just describe the links - provide the actual URLs so users can click them directly."
     
     return table_summary
 
@@ -355,6 +457,11 @@ def get_personalized_recommendations(user_prompt: str, tenders: list, user_prefe
         if any(word in title for word in user_prompt_lower.split()):
             score += 3
             match_reasons.append("Matches your search query")
+        
+        # Document link availability (bonus for tenders with documents)
+        if extract_document_links(tender):
+            score += 2
+            match_reasons.append("Has document links available")
         
         # Urgency scoring
         closing_date = tender.get('closingDate', '')
@@ -415,6 +522,7 @@ CRITICAL RULES - FOLLOW THESE EXACTLY:
 5. Focus on the user's preferences and needs
 6. Format responses clearly with proper spacing and emojis for readability
 7. Be warm, professional, and helpful
+8. WHEN PROVIDING DOCUMENT LINKS: Always include actual clickable URLs in Markdown format like [Document Name](https://example.com/document.pdf)
 
 USER PROFILE:
 - First Name: {first_name}
@@ -430,7 +538,8 @@ RESPONSE GUIDELINES:
 - Focus on providing valuable information without self-references
 - Personalize recommendations based on user preferences
 - Use emojis sparingly to enhance readability
-- Never mention your capabilities or database access"""
+- Never mention your capabilities or database access
+- FOR DOCUMENT LINKS: Always provide clickable URLs, not just descriptions"""
 
         # Set the chat context with system message only if empty
         if not self.chat_context:
@@ -615,15 +724,9 @@ def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
                 tender = rec['tender']
                 reasons = rec['match_reasons']
                 
-                title = tender.get('title', 'No title')
-                category = tender.get('Category', 'Unknown')
-                agency = tender.get('sourceAgency', 'Unknown')
-                closing_date = tender.get('closingDate', 'Unknown')
-                reference_number = tender.get('referenceNumber', 'N/A')
-                
-                personalized_context += f"{i}. **{title}**\n"
-                personalized_context += f"   📊 {category} | 🏢 {agency}\n"
-                personalized_context += f"   📅 {closing_date} | 🏷️ {reference_number}\n"
+                # Use the new formatting with document links
+                tender_formatted = format_tender_with_links(tender)
+                personalized_context += f"{i}. {tender_formatted}\n"
                 if reasons:
                     personalized_context += f"   ✅ {', '.join(reasons)}\n"
                 personalized_context += "\n"
@@ -650,6 +753,7 @@ INSTRUCTIONS:
 - Format responses clearly with proper spacing
 - Never mention database access or your capabilities
 - Focus on being helpful and conversational
+- FOR DOCUMENT LINKS: Always provide actual clickable URLs in Markdown format
 """
     return enhanced_prompt
 
