@@ -93,6 +93,87 @@ class ChatRequest(BaseModel):
     prompt: str
     user_id: str = "guest"
 
+# --- Content Filtering System ---
+class ContentFilter:
+    def __init__(self):
+        self.inappropriate_keywords = [
+            # Racist and hate speech terms
+            'nigger', 'nigga', 'chink', 'spic', 'kike', 'raghead', 'towelhead', 'cracker', 'honky',
+            'wetback', 'gook', 'dyke', 'fag', 'faggot', 'tranny', 'retard', 'midget',
+            
+            # Severe profanity and explicit content
+            'fuck', 'shit', 'asshole', 'bitch', 'cunt', 'pussy', 'dick', 'cock', 'whore', 'slut',
+            'motherfucker', 'bastard', 'douchebag', 'shithead', 'dipshit',
+            
+            # Violent and threatening language
+            'kill you', 'hurt you', 'attack you', 'destroy you', 'harm you', 'beat you',
+            'rape', 'murder', 'suicide', 'bomb', 'terrorist',
+            
+            # Inappropriate requests
+            'naked', 'nude', 'porn', 'sex', 'sexual', 'fuck you', 'suck my',
+            
+            # Self-harm related
+            'kill myself', 'end my life', 'suicide', 'self harm'
+        ]
+        
+        # Tender-related keywords that indicate appropriate questions
+        self.tender_keywords = [
+            'tender', 'bid', 'proposal', 'procurement', 'contract', 'rfp', 'rfq',
+            'government', 'municipal', 'supply', 'service', 'construction', 'it',
+            'engineering', 'consulting', 'maintenance', 'logistics', 'healthcare',
+            'document', 'deadline', 'closing', 'submission', 'requirements',
+            'specification', 'evaluation', 'award', 'vendor', 'supplier',
+            'category', 'agency', 'department', 'opportunity', 'business',
+            'company', 'industry', 'sector', 'project', 'work', 'job',
+            'price', 'quotation', 'estimate', 'budget', 'cost',
+            'compliance', 'regulation', 'policy', 'guideline',
+            'download', 'link', 'pdf', 'document', 'attachment',
+            'contact', 'email', 'phone', 'address', 'location'
+        ]
+    
+    def contains_inappropriate_content(self, text):
+        """Check if text contains inappropriate content"""
+        text_lower = text.lower()
+        
+        for keyword in self.inappropriate_keywords:
+            if keyword in text_lower:
+                print(f"🚫 Content filter blocked: '{keyword}' in message")
+                return True
+        return False
+    
+    def is_tender_related(self, text):
+        """Check if the question is related to tenders or business"""
+        text_lower = text.lower()
+        
+        # Count how many tender-related keywords are present
+        keyword_count = sum(1 for keyword in self.tender_keywords if keyword in text_lower)
+        
+        # If at least 1 tender-related keyword is found, consider it relevant
+        if keyword_count >= 1:
+            return True
+        
+        # Special case: questions about the AI itself or greetings
+        ai_related = any(phrase in text_lower for phrase in [
+            'who are you', 'what are you', 'your name', 'your purpose',
+            'hello', 'hi ', 'hey ', 'good morning', 'good afternoon', 'good evening',
+            'help', 'assist', 'support', 'thank', 'thanks', 'bye', 'goodbye'
+        ])
+        
+        return ai_related
+    
+    def should_respond(self, prompt):
+        """Determine if we should respond to this prompt"""
+        if self.contains_inappropriate_content(prompt):
+            return False, "I apologize, but I cannot respond to that type of content. I'm here to help with tender-related questions and business opportunities."
+        
+        if not self.is_tender_related(prompt):
+            return False, "I'm sorry, but I'm specifically designed to assist with tender-related questions and business opportunities through TenderConnect. I can help you find tender information, document links, categories, and recommendations."
+        
+        return True, None
+
+# Initialize content filter
+content_filter = ContentFilter()
+
 # --- DynamoDB Helper Functions ---
 def dd_to_py(item):
     """Convert DynamoDB item to Python dict"""
@@ -186,10 +267,17 @@ def extract_document_links(tender):
     """Extract all document links from a tender"""
     links = []
     
-    # Check common fields that might contain document links
+    # PRIMARY: Check the 'link' field first (this is the main document link)
+    if 'link' in tender and tender['link']:
+        links.append({
+            'type': 'Document',
+            'url': tender['link']
+        })
+    
+    # SECONDARY: Check other common fields that might contain document links
     link_fields = ['documentLink', 'documents', 'tenderDocuments', 'bidDocuments', 
-                   'attachmentLinks', 'relatedDocuments', 'sourceUrl', 'tenderUrl',
-                   'document_url', 'bid_documents', 'tender_documents', 'attachments']
+                   'attachmentLinks', 'relatedDocuments', 'document_url', 
+                   'bid_documents', 'tender_documents', 'attachments']
     
     for field in link_fields:
         if field in tender and tender[field]:
@@ -208,7 +296,7 @@ def extract_document_links(tender):
                     'url': field_value.strip()
                 })
     
-    # Also check for links in description or other text fields
+    # TERTIARY: Also check for links in description or other text fields
     text_fields = ['description', 'title', 'additionalInfo', 'noticeDetails', 'details']
     for field in text_fields:
         if field in tender and tender[field]:
@@ -254,10 +342,10 @@ def format_tender_with_links(tender):
     else:
         formatted += f"• **Document Links**: No direct links available\n"
     
-    # Add source URL if available
-    source_url = tender.get('sourceUrl') or tender.get('tenderUrl')
+    # Add source URL if available (but emphasize it's not the document link)
+    source_url = tender.get('sourceUrl')
     if source_url and source_url not in [l['url'] for l in document_links]:
-        formatted += f"• **Source**: [View Original]({source_url})\n"
+        formatted += f"• **Source Page**: [View Original Tender]({source_url})\n"
     
     return formatted
 
@@ -419,7 +507,7 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
             sample_count += 1
     
     table_summary += "💡 You have access to all tender data including titles, references, categories, agencies, closing dates, contacts, and document links."
-    table_summary += "\n\n📝 INSTRUCTION FOR DOCUMENT LINKS: When users ask for document links or tender documents, ALWAYS provide the actual clickable URLs in Markdown format like [Document Name](https://example.com/document.pdf). Do not just describe the links - provide the actual URLs so users can click them directly."
+    table_summary += "\n\n📝 CRITICAL INSTRUCTION FOR DOCUMENT LINKS: When users ask for document links or tender documents, ALWAYS provide the actual clickable URLs from the 'link' field in Markdown format like [Download Document PDF](https://example.com/document.pdf). The 'link' field contains the actual document PDF/attachment, while 'sourceUrl' is just the tender information page. Always prioritize the 'link' field for document downloads."
     
     return table_summary
 
@@ -522,7 +610,8 @@ CRITICAL RULES - FOLLOW THESE EXACTLY:
 5. Focus on the user's preferences and needs
 6. Format responses clearly with proper spacing and emojis for readability
 7. Be warm, professional, and helpful
-8. WHEN PROVIDING DOCUMENT LINKS: Always include actual clickable URLs in Markdown format like [Document Name](https://example.com/document.pdf)
+8. **CRITICAL FOR DOCUMENT LINKS**: When providing document links, ALWAYS include actual clickable URLs in Markdown format like [Download Document PDF](https://example.com/document.pdf). The 'link' field contains the actual document, while 'sourceUrl' is just the information page.
+9. **SCOPE LIMITATION**: If a question is completely outside the scope of tenders, business opportunities, or general assistance, respond with: "I'm sorry, but I'm specifically designed to assist with tender-related questions and business opportunities through TenderConnect. I can help you find tender information, document links, categories, and recommendations."
 
 USER PROFILE:
 - First Name: {first_name}
@@ -539,7 +628,8 @@ RESPONSE GUIDELINES:
 - Personalize recommendations based on user preferences
 - Use emojis sparingly to enhance readability
 - Never mention your capabilities or database access
-- FOR DOCUMENT LINKS: Always provide clickable URLs, not just descriptions"""
+- **FOR DOCUMENT LINKS**: Always provide clickable URLs from the 'link' field, not just descriptions
+- **FOR OUT-OF-SCOPE QUESTIONS**: Politely redirect to your purpose as a tender assistant"""
 
         # Set the chat context with system message only if empty
         if not self.chat_context:
@@ -753,128 +843,5 @@ INSTRUCTIONS:
 - Format responses clearly with proper spacing
 - Never mention database access or your capabilities
 - Focus on being helpful and conversational
-- FOR DOCUMENT LINKS: Always provide actual clickable URLs in Markdown format
-"""
-    return enhanced_prompt
-
-# ========== API ENDPOINTS ==========
-
-@app.get("/")
-async def root():
-    tenders = get_embedded_table()
-    tender_count = len(tenders) if tenders else 0
-    
-    return {
-        "message": "B-Max AI Assistant",
-        "status": "healthy" if ollama_available else "degraded",
-        "embedded_tenders": tender_count,
-        "active_sessions": len(user_sessions),
-        "timestamp": datetime.now().isoformat()
-    }
-
-@app.get("/health")
-async def health_check():
-    tenders = get_embedded_table()
-    tender_count = len(tenders) if tenders else 0
-    
-    # Perform session cleanup on health check
-    cleanup_old_sessions()
-    
-    return {
-        "status": "ok",
-        "service": "B-Max AI Assistant",
-        "embedded_tenders": tender_count,
-        "active_sessions": len(user_sessions),
-        "ollama_available": ollama_available,
-        "timestamp": datetime.now().isoformat()
-    }
-
-@app.post("/chat")
-async def chat(request: ChatRequest):
-    try:
-        if not ollama_available:
-            raise HTTPException(status_code=503, detail="AI service temporarily unavailable")
-        
-        print(f"💬 Chat request received - user_id: {request.user_id}, prompt: {request.prompt}")
-        
-        session = get_user_session(request.user_id)
-        user_first_name = session.get_first_name()
-        
-        print(f"🎯 Using session - First name: {user_first_name}, Total messages: {session.total_messages}")
-        print(f"📊 Current context length: {len(session.chat_context)}")
-        
-        # Enhance prompt with embedded table context
-        enhanced_prompt = enhance_prompt_with_context(request.prompt, session)
-        
-        # Add enhanced user message to context
-        session.add_message("user", enhanced_prompt)
-        
-        # Get the current chat context for the AI
-        chat_context = session.get_chat_context()
-        
-        # Get AI response
-        try:
-            response = client.chat(
-                'deepseek-v3.1:671b-cloud', 
-                messages=chat_context
-            )
-            response_text = response['message']['content']
-        except Exception as e:
-            print(f"❌ Ollama API error: {e}")
-            response_text = f"I apologize {user_first_name}, but I'm having trouble processing your request right now. Please try again in a moment."
-        
-        # Add assistant response to context
-        session.add_message("assistant", response_text)
-        
-        print(f"✅ Response sent to {user_first_name}. Total session messages: {session.total_messages}")
-        
-        return {
-            "response": response_text,
-            "user_id": request.user_id,
-            "username": user_first_name,
-            "full_name": session.get_display_name(),
-            "timestamp": datetime.now().isoformat(),
-            "session_active": True,
-            "total_messages": session.total_messages
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Chat error: {e}")
-        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
-
-@app.get("/session-info/{user_id}")
-async def get_session_info(user_id: str):
-    """Debug endpoint to check session state"""
-    if user_id in user_sessions:
-        session = user_sessions[user_id]
-        return {
-            "user_id": user_id,
-            "first_name": session.get_first_name(),
-            "total_messages": session.total_messages,
-            "context_length": len(session.chat_context),
-            "last_active": session.last_active.isoformat(),
-            "session_id": session.session_id
-        }
-    else:
-        return {"error": "Session not found"}
-
-# Initialize embedded table on startup
-@app.on_event("startup")
-async def startup_event():
-    print("🚀 Initializing embedded tender table...")
-    embed_tender_table()
-    print("✅ Startup complete")
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    print("🚀 Starting B-Max AI Assistant...")
-    print("💬 Endpoint: POST /chat")
-    print("🔧 Health: GET /health")
-    print("🐛 Session Debug: GET /session-info/{user_id}")
-    print("📊 Database:", "Connected" if dynamodb else "Disconnected")
-    print("🤖 Ollama:", "Connected" if ollama_available else "Disconnected")
-    print(f"🌐 Server running on port {port}")
-    
-    uvicorn.run(app, host="0.0.0.0", port=port)
+- FOR DOCUMENT LINKS: Always provide actual clickable URLs from the 'link' field in Markdown format
+- FOR OUT-OF-SCOPE QUESTIONS: If the question is completely unrelated to tenders or business, politely explain your
