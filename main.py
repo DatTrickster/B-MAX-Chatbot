@@ -115,7 +115,7 @@ def dd_to_py(item):
     return result
 
 def embed_tender_table():
-    """Embed the entire tender table into memory for AI context"""
+    """Embed the entire ProcessedTender table into memory for AI context"""
     global embedded_tender_table, last_table_update
     
     try:
@@ -123,7 +123,7 @@ def embed_tender_table():
             print("❌ DynamoDB client not available")
             return None
         
-        print("🧠 Embedding entire tender table into AI context...")
+        print("🧠 Embedding entire ProcessedTender table into AI context...")
         all_tenders = []
         last_evaluated_key = None
         
@@ -151,7 +151,7 @@ def embed_tender_table():
         embedded_tender_table = all_tenders
         last_table_update = datetime.now()
         
-        print(f"✅ Embedded {len(all_tenders)} tenders into AI context")
+        print(f"✅ Embedded {len(all_tenders)} tenders from ProcessedTender table into AI context")
         
         # Log table statistics
         if all_tenders:
@@ -168,13 +168,13 @@ def embed_tender_table():
                 agencies[agency] = agencies.get(agency, 0) + 1
                 statuses[status] = statuses.get(status, 0) + 1
             
-            print(f"📊 Table Stats - Categories: {len(categories)}, Agencies: {len(agencies)}, Statuses: {len(statuses)}")
+            print(f"📊 ProcessedTender Table Stats - Categories: {len(categories)}, Agencies: {len(agencies)}, Statuses: {len(statuses)}")
             print(f"🏷️ Top Categories: {list(categories.keys())[:5]}")
         
         return all_tenders
         
     except Exception as e:
-        print(f"❌ Error embedding tender table: {e}")
+        print(f"❌ Error embedding ProcessedTender table: {e}")
         return None
 
 def get_embedded_table():
@@ -190,12 +190,12 @@ def get_embedded_table():
     return embedded_tender_table
 
 def format_embedded_table_for_ai(tenders):
-    """Format the entire embedded table for AI consumption"""
+    """Format the entire embedded ProcessedTender table for AI consumption"""
     if not tenders:
-        return "EMBEDDED TENDER TABLE: No data available"
+        return "EMBEDDED PROCESSEDTENDER TABLE: No data available"
     
     # Create a comprehensive summary of the table
-    table_summary = "COMPLETE TENDER DATABASE EMBEDDED IN CONTEXT:\n\n"
+    table_summary = "COMPLETE PROCESSEDTENDER DATABASE EMBEDDED IN CONTEXT:\n\n"
     
     # Table statistics
     total_tenders = len(tenders)
@@ -212,7 +212,7 @@ def format_embedded_table_for_ai(tenders):
         agencies[agency] = agencies.get(agency, 0) + 1
         statuses[status] = statuses.get(status, 0) + 1
     
-    table_summary += f"📊 DATABASE OVERVIEW:\n"
+    table_summary += f"📊 PROCESSEDTENDER DATABASE OVERVIEW:\n"
     table_summary += f"• Total Tenders: {total_tenders}\n"
     table_summary += f"• Categories: {len(categories)}\n"
     table_summary += f"• Agencies: {len(agencies)}\n"
@@ -225,29 +225,43 @@ def format_embedded_table_for_ai(tenders):
     
     table_summary += "\n"
     
-    # Recent tenders sample
-    table_summary += "📋 SAMPLE OF AVAILABLE TENDERS:\n"
-    for i, tender in enumerate(tenders[:12], 1):
-        title = tender.get('title', 'No title')[:60] + '...' if len(tender.get('title', '')) > 60 else tender.get('title', 'No title')
+    # Recent tenders sample with ALL fields from ProcessedTender
+    table_summary += "📋 SAMPLE OF AVAILABLE TENDERS (with all ProcessedTender fields):\n"
+    for i, tender in enumerate(tenders[:10], 1):
+        title = tender.get('title', 'No title')
         category = tender.get('Category', 'Unknown')
         agency = tender.get('sourceAgency', 'Unknown')
         closing_date = tender.get('closingDate', 'Unknown')
         status = tender.get('status', 'Unknown')
+        reference_number = tender.get('referenceNumber', 'N/A')
+        contact_name = tender.get('contactName', 'N/A')
+        contact_email = tender.get('contactEmail', 'N/A')
+        contact_number = tender.get('contactNumber', 'N/A')
+        link = tender.get('link', 'N/A')
+        source_url = tender.get('sourceUrl', 'N/A')
         
-        table_summary += f"{i}. {title}\n"
-        table_summary += f"   📊 {category} | 🏢 {agency}\n"
-        table_summary += f"   📅 {closing_date} | 📈 {status}\n\n"
+        table_summary += f"🚀 TENDER #{i}:\n"
+        table_summary += f"   📋 Title: {title}\n"
+        table_summary += f"   🏷️ Reference: {reference_number}\n"
+        table_summary += f"   📊 Category: {category}\n"
+        table_summary += f"   🏢 Agency: {agency}\n"
+        table_summary += f"   📅 Closing: {closing_date}\n"
+        table_summary += f"   📈 Status: {status}\n"
+        table_summary += f"   👤 Contact: {contact_name} | {contact_email} | {contact_number}\n"
+        table_summary += f"   🔗 Documents: {link}\n"
+        table_summary += f"   🌐 Source: {source_url}\n\n"
     
-    table_summary += "💡 You have access to ALL tender data. Use this complete information to provide accurate, comprehensive answers and recommendations."
+    table_summary += "💡 You have COMPLETE access to ALL ProcessedTender data including titles, references, categories, agencies, closing dates, contacts, and document links. Use this comprehensive information to provide accurate, detailed answers and recommendations."
     
     return table_summary
 
 def get_intelligent_insights(user_prompt: str, tenders: list):
-    """Generate intelligent insights based on the embedded table"""
+    """Generate intelligent insights based on the embedded ProcessedTender table"""
     if not tenders:
         return "No data available for analysis."
     
     insights = []
+    user_prompt_lower = user_prompt.lower()
     
     # Category distribution insights
     categories = {}
@@ -274,9 +288,10 @@ def get_intelligent_insights(user_prompt: str, tenders: list):
         agency = tender.get('sourceAgency', 'Unknown')
         agencies[agency] = agencies.get(agency, 0) + 1
     
-    # Generate insights based on user query
-    user_prompt_lower = user_prompt.lower()
+    # Contact availability insights
+    tenders_with_contacts = [t for t in tenders if t.get('contactName') != 'N/A' and t.get('contactName')]
     
+    # Generate insights based on user query
     if any(word in user_prompt_lower for word in ['category', 'categories', 'type']):
         top_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]
         insights.append(f"📊 Category Distribution: {', '.join([f'{cat} ({count})' for cat, count in top_categories])}")
@@ -288,14 +303,58 @@ def get_intelligent_insights(user_prompt: str, tenders: list):
         top_agencies = sorted(agencies.items(), key=lambda x: x[1], reverse=True)[:5]
         insights.append(f"🏢 Top Agencies: {', '.join([f'{agency} ({count})' for agency, count in top_agencies])}")
     
+    if any(word in user_prompt_lower for word in ['contact', 'email', 'phone', 'person']):
+        insights.append(f"📞 Contact Info Available: {len(tenders_with_contacts)} tenders have contact details")
+    
     # General insights
     if not insights:
         insights.append(f"📈 Database contains {len(tenders)} tenders across {len(categories)} categories")
         insights.append(f"🏢 {len(agencies)} different agencies publishing opportunities")
         if urgent_tenders:
             insights.append(f"⏰ {len(urgent_tenders)} tenders closing within 7 days")
+        if tenders_with_contacts:
+            insights.append(f"📞 {len(tenders_with_contacts)} tenders with contact information")
     
     return " | ".join(insights)
+
+def find_relevant_tenders(user_prompt: str, tenders: list):
+    """Find the most relevant tenders based on user query"""
+    if not tenders:
+        return []
+    
+    user_prompt_lower = user_prompt.lower()
+    relevant_tenders = []
+    
+    # Score tenders based on relevance to query
+    for tender in tenders:
+        score = 0
+        
+        # Title relevance
+        title = tender.get('title', '').lower()
+        if any(word in title for word in user_prompt_lower.split()):
+            score += 3
+        
+        # Category relevance
+        category = tender.get('Category', '').lower()
+        if any(word in category for word in user_prompt_lower.split()):
+            score += 2
+        
+        # Agency relevance
+        agency = tender.get('sourceAgency', '').lower()
+        if any(word in agency for word in user_prompt_lower.split()):
+            score += 1
+        
+        # Status relevance
+        status = tender.get('status', '').lower()
+        if 'active' in status or 'open' in status:
+            score += 1
+        
+        if score > 0:
+            relevant_tenders.append((tender, score))
+    
+    # Sort by relevance score and return top 5
+    relevant_tenders.sort(key=lambda x: x[1], reverse=True)
+    return [tender for tender, score in relevant_tenders[:5]]
 
 class UserSession:
     def __init__(self, user_id):
@@ -319,36 +378,42 @@ class UserSession:
     def create_system_prompt(self, username: str, first_name: str):
         # Get the embedded table for system context
         tenders = get_embedded_table()
-        table_context = format_embedded_table_for_ai(tenders) if tenders else "Tender database not currently available."
+        table_context = format_embedded_table_for_ai(tenders) if tenders else "ProcessedTender database not currently available."
         
-        return f"""You are B-Max, an AI assistant for TenderConnect with COMPLETE ACCESS to the entire tender database.
+        return f"""You are B-Max, an AI assistant for TenderConnect with COMPLETE ACCESS to the entire ProcessedTender database.
 
 CRITICAL RULES - FOLLOW THESE EXACTLY:
-1. You have the ENTIRE tender database embedded in your context
+1. You have the ENTIRE ProcessedTender database embedded in your context with ALL fields
 2. Use the complete table data to provide accurate, comprehensive answers
 3. ALWAYS address the user by their first name "{first_name}"
-4. Provide data-driven insights and recommendations
-5. Reference specific tenders, categories, and statistics from the embedded table
-6. Never invent or create fake tender data - you have the real data
+4. Provide data-driven insights and recommendations using REAL data
+5. Reference specific tenders, categories, agencies, contacts, and deadlines from the embedded table
+6. Never invent or create fake tender data - you have access to all real ProcessedTender data
 7. Be proactive in suggesting opportunities based on complete database knowledge
 
-YOUR CAPABILITIES WITH EMBEDDED TABLE:
-- Access to ALL tenders, categories, agencies, and statuses
+AVAILABLE TENDER FIELDS IN PROCESSEDTENDER TABLE:
+- title, Category, sourceAgency, closingDate, status, referenceNumber
+- contactName, contactEmail, contactNumber, link, sourceUrl
+- And all other fields from the ProcessedTender table
+
+YOUR CAPABILITIES WITH EMBEDDED PROCESSEDTENDER TABLE:
+- Access to ALL tenders with complete field information
 - Ability to analyze patterns and trends across the entire database
 - Provide statistical insights and data-driven recommendations
-- Compare and contrast different opportunities
-- Identify gaps and opportunities in the market
+- Compare and contrast different opportunities with full details
+- Identify urgent opportunities and provide contact information
+- Reference specific tender details like reference numbers and document links
 
-EMBEDDED DATABASE CONTEXT:
+EMBEDDED PROCESSEDTENDER DATABASE CONTEXT:
 {table_context}
 
 Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 IMPORTANT: 
-- You have COMPLETE knowledge of all available tenders
+- You have COMPLETE knowledge of all available tenders in ProcessedTender table
 - Use this comprehensive knowledge to provide the best recommendations
-- Reference actual data points and statistics
-- Be specific about what's available in the database"""
+- Reference actual data points, contact details, and specific tender information
+- Be specific about what's available in the database including reference numbers and links"""
 
     def load_user_profile(self):
         self.user_profile = {
@@ -395,43 +460,68 @@ def cleanup_old_sessions():
         del user_sessions[user_id]
 
 def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
-    """Enhance prompt with embedded table context and intelligent insights"""
+    """Enhance prompt with embedded ProcessedTender table context and intelligent insights"""
     
     # Get the embedded table
     tenders = get_embedded_table()
     
     if not tenders:
-        database_context = "⚠️ Tender database not currently available."
+        database_context = "⚠️ ProcessedTender database not currently available."
         insights = "No insights available."
+        relevant_tenders_context = ""
     else:
         # Generate intelligent insights based on the embedded data
         insights = get_intelligent_insights(user_prompt, tenders)
+        
+        # Find relevant tenders for the specific query
+        relevant_tenders = find_relevant_tenders(user_prompt, tenders)
+        
+        # Format relevant tenders context
+        if relevant_tenders:
+            relevant_tenders_context = "🎯 RELEVANT TENDERS FOR YOUR QUERY:\n\n"
+            for i, tender in enumerate(relevant_tenders, 1):
+                title = tender.get('title', 'No title')
+                category = tender.get('Category', 'Unknown')
+                agency = tender.get('sourceAgency', 'Unknown')
+                closing_date = tender.get('closingDate', 'Unknown')
+                status = tender.get('status', 'Unknown')
+                reference_number = tender.get('referenceNumber', 'N/A')
+                
+                relevant_tenders_context += f"{i}. {title}\n"
+                relevant_tenders_context += f"   📊 {category} | 🏢 {agency}\n"
+                relevant_tenders_context += f"   📅 {closing_date} | 📈 {status}\n"
+                relevant_tenders_context += f"   🏷️ Ref: {reference_number}\n\n"
+        else:
+            relevant_tenders_context = "No specific tenders match your query, but I have access to all tenders in the database."
         
         # For specific queries, provide focused context
         if any(word in user_prompt.lower() for word in ['stat', 'analytics', 'overview', 'summary']):
             database_context = format_embedded_table_for_ai(tenders)
         else:
             # Provide a concise context for regular queries
-            database_context = f"COMPLETE DATABASE ACCESS: {len(tenders)} tenders available across multiple categories and agencies."
+            database_context = f"COMPLETE PROCESSEDTENDER DATABASE ACCESS: {len(tenders)} tenders available with full details including contacts, references, and document links."
     
     user_first_name = session.get_first_name()
     
     enhanced_prompt = f"""
-User: {first_name}
+User: {user_first_name}
 Message: {user_prompt}
 
-DATABASE CONTEXT:
+PROCESSEDTENDER DATABASE CONTEXT:
 {database_context}
 
 INTELLIGENT INSIGHTS:
 {insights}
 
+{relevant_tenders_context}
+
 INSTRUCTIONS:
-- You have COMPLETE access to the tender database
-- Provide data-driven, specific recommendations
-- Reference actual tenders, categories, and statistics
-- Use your full knowledge of the embedded table
-- Be proactive in suggesting relevant opportunities
+- You have COMPLETE access to the ProcessedTender database with ALL fields
+- Provide data-driven, specific recommendations with reference numbers
+- Include contact information and document links when available
+- Reference actual tenders from the embedded table
+- Use your full knowledge of the database to provide comprehensive answers
+- Be proactive in suggesting relevant opportunities with specific details
 """
     return enhanced_prompt
 
@@ -443,7 +533,7 @@ async def root():
     tender_count = len(tenders) if tenders else 0
     
     return {
-        "message": "B-Max AI Assistant with Embedded Database",
+        "message": "B-Max AI Assistant with Embedded ProcessedTender Database",
         "status": "healthy" if ollama_available else "degraded",
         "embedded_tenders": tender_count,
         "last_update": last_table_update.isoformat() if last_table_update else None,
@@ -465,7 +555,7 @@ async def health_check():
     
     return {
         "status": "ok",
-        "service": "B-Max AI Assistant with Embedded DB",
+        "service": "B-Max AI Assistant with Embedded ProcessedTender DB",
         "embedded_data": {
             "total_tenders": tender_count,
             "unique_categories": len(categories),
@@ -490,7 +580,7 @@ async def chat(request: ChatRequest):
         session = get_user_session(request.user_id)
         user_first_name = session.get_first_name()
         
-        print(f"🎯 Using session with embedded table - First name: {user_first_name}")
+        print(f"🎯 Using session with embedded ProcessedTender table - First name: {user_first_name}")
         
         # Enhance prompt with embedded table context
         enhanced_prompt = enhance_prompt_with_context(request.prompt, session)
@@ -512,7 +602,7 @@ async def chat(request: ChatRequest):
         # Add assistant response to context
         session.add_message("assistant", response_text)
         
-        print(f"✅ Response sent using embedded database context")
+        print(f"✅ Response sent using embedded ProcessedTender database context")
         
         return {
             "response": response_text,
@@ -532,11 +622,11 @@ async def chat(request: ChatRequest):
 
 @app.post("/refresh-embedded-data")
 async def refresh_embedded_data():
-    """Force refresh of the embedded tender table"""
+    """Force refresh of the embedded ProcessedTender table"""
     try:
         tenders = embed_tender_table()
         return {
-            "message": "Embedded data refreshed successfully",
+            "message": "Embedded ProcessedTender data refreshed successfully",
             "tenders_embedded": len(tenders) if tenders else 0,
             "timestamp": datetime.now().isoformat()
         }
@@ -546,12 +636,12 @@ async def refresh_embedded_data():
 # Initialize embedded table on startup
 @app.on_event("startup")
 async def startup_event():
-    print("🚀 Initializing embedded tender table...")
+    print("🚀 Initializing embedded ProcessedTender table...")
     embed_tender_table()
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    print("🚀 Starting B-Max AI Assistant with Embedded Database...")
+    print("🚀 Starting B-Max AI Assistant with Embedded ProcessedTender Database...")
     print("💬 Endpoint: POST /chat")
     print("🔧 Health: GET /health")
     print("🔄 Refresh: POST /refresh-embedded-data")
