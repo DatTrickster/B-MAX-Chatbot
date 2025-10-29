@@ -116,9 +116,6 @@ def get_cognito_user_by_username(username: str):
         print(f"✅ Found Cognito user: {username} -> UUID: {cognito_user['user_id']}")
         return cognito_user
         
-    except cognito.exceptions.UserNotFoundException:
-        print(f"❌ Cognito user not found: {username}")
-        return None
     except Exception as e:
         print(f"❌ Error fetching Cognito user {username}: {e}")
         return None
@@ -211,6 +208,30 @@ def get_user_profile_by_email(email: str):
         print(f"❌ Error scanning for user by email: {e}")
         return None
 
+def get_all_users():
+    """Get all users from DynamoDB"""
+    try:
+        resp = dynamodb.scan(TableName=DYNAMODB_TABLE_USERS)
+        users = [dd_to_py(item) for item in resp.get('Items', [])]
+        
+        # Return only safe fields
+        safe_users = []
+        for user in users:
+            safe_user = {
+                'userId': user.get('userId'),
+                'email': user.get('email'),
+                'firstName': user.get('firstName'),
+                'lastName': user.get('lastName'),
+                'companyName': user.get('companyName'),
+                'position': user.get('position')
+            }
+            safe_users.append(safe_user)
+        
+        return safe_users
+    except Exception as e:
+        print(f"❌ Error getting all users: {e}")
+        return []
+
 class UserSession:
     def __init__(self, user_id):
         self.user_id = user_id
@@ -257,6 +278,9 @@ CRITICAL RULES - FOLLOW THESE EXACTLY:
 3. Be warm, friendly, and professional
 4. Remember context from previous messages
 5. If you don't know something, be honest and say so
+6. Use emojis occasionally to make conversations friendly
+7. Keep responses concise but informative
+8. Focus on tender-related topics and procurement
 
 User Profile:
 - Full Name: {username}
@@ -384,7 +408,102 @@ def cleanup_old_sessions():
     for user_id in expired_users:
         del user_sessions[user_id]
 
-# Debug endpoint to test Cognito lookup
+# ========== API ENDPOINTS ==========
+
+@app.get("/")
+async def root():
+    return {
+        "message": "B-Max AI Assistant API is running!",
+        "status": "healthy" if ollama_available else "degraded",
+        "cognito_enabled": cognito is not None,
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "ok",
+        "service": "B-Max AI Assistant",
+        "dynamodb": "connected" if dynamodb else "disconnected",
+        "cognito": "connected" if cognito else "disabled",
+        "ollama": "connected" if ollama_available else "disconnected",
+        "active_sessions": len(user_sessions),
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.post("/chat")
+async def chat(request: ChatRequest):
+    try:
+        if not ollama_available:
+            raise HTTPException(status_code=503, detail="AI service temporarily unavailable")
+        
+        cleanup_old_sessions()
+        
+        print(f"💬 Chat request received - user_id: {request.user_id}, prompt: {request.prompt}")
+        
+        session = get_user_session(request.user_id)
+        user_first_name = session.get_first_name()
+        
+        print(f"🎯 Using session - First name: {user_first_name}")
+        
+        # Add user message to context
+        session.add_message("user", request.prompt)
+        
+        # Get AI response
+        try:
+            response = client.chat(
+                'deepseek-v3.1:671b-cloud', 
+                messages=session.chat_context
+            )
+            response_text = response['message']['content']
+        except Exception as e:
+            print(f"❌ Ollama API error: {e}")
+            response_text = f"I apologize {user_first_name}, but I'm having trouble processing your request right now. Please try again in a moment."
+        
+        # Add assistant response to context
+        session.add_message("assistant", response_text)
+        
+        print(f"✅ Response sent to {user_first_name}")
+        
+        return {
+            "response": response_text,
+            "user_id": request.user_id,
+            "username": user_first_name,
+            "full_name": session.get_display_name(),
+            "timestamp": datetime.now().isoformat(),
+            "session_active": True
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Chat error: {e}")
+        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
+
+@app.get("/session/{user_id}")
+async def get_session_info(user_id: str):
+    if user_id not in user_sessions:
+        return {"error": "Session not found"}
+    
+    session = user_sessions[user_id]
+    return {
+        "user_id": session.user_id,
+        "username": session.get_display_name(),
+        "first_name": session.get_first_name(),
+        "company": session.user_profile.get('companyName', 'Unknown') if session.user_profile else 'Unknown',
+        "position": session.user_profile.get('position', 'Unknown') if session.user_profile else 'Unknown',
+        "message_count": len(session.chat_context) - 1,
+        "last_active": session.last_active.isoformat()
+    }
+
+@app.delete("/session/{user_id}")
+async def clear_session(user_id: str):
+    if user_id in user_sessions:
+        del user_sessions[user_id]
+        return {"message": "Session cleared successfully"}
+    return {"message": "Session not found"}
+
+# Debug endpoints
 @app.get("/api/cognito-user/{username}")
 async def get_cognito_user_info(username: str):
     """Get Cognito user information for debugging"""
@@ -409,35 +528,83 @@ async def get_cognito_user_info(username: str):
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/")
-async def root():
-    return {
-        "message": "B-Max AI Assistant API is running!",
-        "status": "healthy" if ollama_available else "degraded",
-        "cognito_enabled": cognito is not None,
-        "endpoints": {
-            "chat": "/chat (POST)",
-            "health": "/health",
-            "session_info": "/session/{user_id}",
-            "cognito_user": "/api/cognito-user/{username}",
-            "find_user": "/api/find-user/{identifier}",
-            "all_users": "/api/all-users"
+@app.get("/api/all-users")
+async def get_all_users_endpoint():
+    """Get all users for debugging"""
+    try:
+        users = get_all_users()
+        return {
+            "total_users": len(users),
+            "users": users
         }
-    }
+    except Exception as e:
+        return {"error": str(e)}
 
-# ... (rest of the endpoints remain the same as previous version)
+@app.get("/api/find-user/{identifier}")
+async def find_user_by_identifier(identifier: str):
+    """Find user by any identifier (userId, email, cognitoUsername)"""
+    try:
+        # Try all lookup methods
+        profile_by_id = get_user_profile_by_user_id(identifier)
+        if profile_by_id:
+            return {
+                "identifier": identifier,
+                "found_by": "userId",
+                "profile": {
+                    "userId": profile_by_id.get('userId'),
+                    "firstName": profile_by_id.get('firstName'),
+                    "lastName": profile_by_id.get('lastName'),
+                    "email": profile_by_id.get('email'),
+                    "companyName": profile_by_id.get('companyName')
+                }
+            }
+        
+        # Try by email
+        if '@' in identifier:
+            profile_by_email = get_user_profile_by_email(identifier)
+            if profile_by_email:
+                return {
+                    "identifier": identifier,
+                    "found_by": "email",
+                    "profile": {
+                        "userId": profile_by_email.get('userId'),
+                        "firstName": profile_by_email.get('firstName'),
+                        "lastName": profile_by_email.get('lastName'),
+                        "email": profile_by_email.get('email'),
+                        "companyName": profile_by_email.get('companyName')
+                    }
+                }
+        
+        # Try Cognito lookup
+        cognito_user = get_cognito_user_by_username(identifier)
+        if cognito_user:
+            return {
+                "identifier": identifier,
+                "found_by": "cognito",
+                "cognito_user": {
+                    "user_id": cognito_user.get('user_id'),
+                    "email": cognito_user.get('email')
+                },
+                "profile": None
+            }
+        
+        return {
+            "identifier": identifier,
+            "found_by": "not_found",
+            "profile": None
+        }
+            
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
     print("🚀 Starting B-Max AI Assistant...")
     print("💬 Endpoint: POST /chat")
     print("🔧 Health: GET /health")
     print("📊 Database:", "Connected" if dynamodb else "Disconnected")
     print("🔐 Cognito:", "Connected" if cognito else "Disabled")
     print("🤖 Ollama:", "Connected" if ollama_available else "Disconnected")
+    print(f"🌐 Server running on port {port}")
     
-    uvicorn.run(
-        app, 
-        host="0.0.0.0", 
-        port=int(os.getenv("PORT", 8000)),
-        access_log=True
-    )
+    uvicorn.run(app, host="0.0.0.0", port=port)
