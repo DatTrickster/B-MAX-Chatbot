@@ -232,6 +232,56 @@ def get_all_users():
         print(f"❌ Error getting all users: {e}")
         return []
 
+def get_tender_information(query: str = None, user_id: str = None):
+    """Get tender information from database for context"""
+    try:
+        if not dynamodb:
+            return "Database currently unavailable"
+        
+        # Simple implementation for demo - get recent tenders
+        response = dynamodb.scan(
+            TableName=DYNAMODB_TABLE_TENDERS,
+            Limit=5,
+            Select='SPECIFIC_ATTRIBUTES',
+            ProjectionExpression='title, Category, closingDate, sourceAgency, status'
+        )
+        
+        items = response.get('Items', [])
+        if not items:
+            return "No tenders found in the database."
+        
+        tenders_info = []
+        for item in items:
+            tender = {}
+            for key, value in item.items():
+                if 'S' in value:
+                    tender[key] = value['S']
+            tenders_info.append(tender)
+        
+        return format_tenders_for_ai(tenders_info)
+        
+    except Exception as e:
+        return f"Error accessing tender database: {str(e)}"
+
+def format_tenders_for_ai(tenders):
+    """Format tender information for AI context"""
+    if not tenders:
+        return "No tender data available."
+    
+    formatted = "Recent Tenders Available:\n"
+    for i, tender in enumerate(tenders, 1):
+        title = tender.get('title', 'Unknown Title')[:60] + '...' if len(tender.get('title', '')) > 60 else tender.get('title', 'Unknown Title')
+        category = tender.get('Category', 'Uncategorized')
+        closing_date = tender.get('closingDate', 'Unknown')
+        agency = tender.get('sourceAgency', 'Unknown Agency')
+        status = tender.get('status', 'Unknown')
+        
+        formatted += f"{i}. {title}\n"
+        formatted += f"   Category: {category} | Agency: {agency}\n"
+        formatted += f"   Closes: {closing_date} | Status: {status}\n\n"
+    
+    return formatted
+
 class UserSession:
     def __init__(self, user_id):
         self.user_id = user_id
@@ -274,25 +324,40 @@ class UserSession:
 
 CRITICAL RULES - FOLLOW THESE EXACTLY:
 1. ALWAYS address the user by their first name "{first_name}" in EVERY response
-2. Never use "User" - always use "{first_name}"
+2. Never use "User" or the username - always use "{first_name}"
 3. Be warm, friendly, and professional
 4. Remember context from previous messages
 5. If you don't know something, be honest and say so
 6. Use emojis occasionally to make conversations friendly
 7. Keep responses concise but informative
 8. Focus on tender-related topics and procurement
+9. NEVER mention or reference other users or their information
+10. NEVER share any user profile details beyond what's necessary for the conversation
+11. When users ask about tenders, provide relevant tender information and recommendations
+12. Use the user's preferences to personalize tender recommendations when appropriate
 
-User Profile:
-- Full Name: {username}
+User Profile (FOR CONTEXT ONLY - DO NOT SHARE):
 - First Name: {first_name} (USE THIS IN ALL RESPONSES)
 - Company: {company}
 - Position: {position}
 - Location: {location}
 - Preferred Categories: {categories_str}
 
+Your capabilities:
+- Answer questions about tenders and procurement processes
+- Provide tender recommendations based on user preferences
+- Explain tender categories and requirements
+- Help with tender search strategies
+- Provide information about tender deadlines and procedures
+
 Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-IMPORTANT: Start your first response with "Hi {first_name}! 👋" and always use their name in responses."""
+IMPORTANT: 
+- Start conversations naturally based on the user's first message
+- Always use "{first_name}" but don't force it into every sentence
+- Focus on providing helpful tender information and recommendations
+- Never discuss other users or their data
+- Keep responses professional and tender-focused"""
 
     def load_user_profile(self):
         """Load user profile using Cognito to get UUID, then DynamoDB"""
@@ -408,6 +473,28 @@ def cleanup_old_sessions():
     for user_id in expired_users:
         del user_sessions[user_id]
 
+def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
+    """Enhance user prompt with tender context and personalization"""
+    database_context = ""
+    tender_keywords = ['tender', 'tenders', 'procurement', 'bid', 'category', 'recommend', 'suggest', 'opportunity', 'RFP', 'RFQ']
+    
+    # Add tender context if the message is tender-related
+    if any(keyword in user_prompt.lower() for keyword in tender_keywords):
+        database_context = get_tender_information(user_prompt, session.user_id)
+    
+    user_first_name = session.get_first_name()
+    
+    enhanced_prompt = f"""
+User: {user_first_name}
+Message: {user_prompt}
+
+{database_context if database_context else ""}
+
+Remember to address the user by their first name "{user_first_name}" naturally in your response.
+Focus on providing helpful tender information and recommendations.
+"""
+    return enhanced_prompt
+
 # ========== API ENDPOINTS ==========
 
 @app.get("/")
@@ -446,8 +533,11 @@ async def chat(request: ChatRequest):
         
         print(f"🎯 Using session - First name: {user_first_name}")
         
-        # Add user message to context
-        session.add_message("user", request.prompt)
+        # Enhance prompt with tender context if relevant
+        enhanced_prompt = enhance_prompt_with_context(request.prompt, session)
+        
+        # Add enhanced user message to context
+        session.add_message("user", enhanced_prompt)
         
         # Get AI response
         try:
