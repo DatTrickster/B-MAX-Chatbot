@@ -78,15 +78,17 @@ class UserSession:
         self.greeted = False
         self.bookmark_patterns = None
         
-        # Load user profile first
+        # Load user profile FIRST before creating system prompt
         self.load_user_profile()
         
-        # Set up system prompt
+        # Set up system prompt AFTER profile is loaded
         username = self.get_display_name()
         first_name = self.get_first_name()
         self.chat_context = [
             {"role": "system", "content": self.create_system_prompt(username, first_name)}
         ]
+        
+        print(f"🎯 Created session for: {first_name} ({username})")
 
     def create_system_prompt(self, username: str, first_name: str):
         company = self.user_profile.get('companyName', 'Unknown') if self.user_profile else 'Unknown'
@@ -105,14 +107,13 @@ class UserSession:
         
         return f"""You are B-Max, an AI assistant for TenderConnect. 
 
-IMPORTANT RULES:
-1. Always be respectful, professional, and helpful
-2. Remember context from previous messages
-3. Personalize responses using the user's first name: {first_name}
+CRITICAL RULES:
+1. ALWAYS address the user by their first name "{first_name}" in your responses
+2. Be warm, friendly, and professional
+3. Remember context from previous messages
 4. If you don't know something, be honest and say so
 5. Keep responses concise but informative
 6. Use emojis occasionally to make conversations friendly
-7. Always address the user by their first name in responses
 
 Your capabilities:
 - Answer questions about tenders and procurement
@@ -122,7 +123,7 @@ Your capabilities:
 
 User Profile:
 - Full Name: {username}
-- First Name: {first_name}
+- First Name: {first_name} (USE THIS NAME IN ALL RESPONSES)
 - Company: {company}
 - Position: {position}
 - Location: {location}
@@ -130,20 +131,22 @@ User Profile:
 
 Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-Start by greeting the user warmly using their first name: {first_name}."""
+IMPORTANT: Start your first response with a warm greeting that includes the user's first name "{first_name}". For example: "Hi {first_name}! 👋" or "Hello {first_name}! 😊""
 
     def load_user_profile(self):
         """Load user profile from UserProfiles table using the correct schema"""
         try:
             if dynamodb:
+                print(f"🔍 Loading profile for user: {self.user_id}")
                 response = dynamodb.get_item(
                     TableName=DYNAMODB_TABLE_USERS,
                     Key={'userId': {'S': self.user_id}}
                 )
                 if 'Item' in response:
                     self.user_profile = self.dynamodb_to_python_enhanced(response['Item'])
-                    print(f"📋 Loaded profile for user: {self.user_id}")
+                    print(f"✅ Loaded profile for user: {self.user_id}")
                     print(f"   Name: {self.get_display_name()}")
+                    print(f"   First Name: {self.get_first_name()}")
                     print(f"   Company: {self.user_profile.get('companyName', 'Unknown')}")
                 else:
                     print(f"❌ No profile found for user: {self.user_id}")
@@ -177,7 +180,8 @@ Start by greeting the user warmly using their first name: {first_name}."""
         return result
 
     def create_default_profile(self):
-        return {
+        """Create a default profile when user not found"""
+        default_profile = {
             'firstName': 'User',
             'lastName': '',
             'companyName': 'Unknown',
@@ -185,6 +189,8 @@ Start by greeting the user warmly using their first name: {first_name}."""
             'location': 'Unknown',
             'preferredCategories': []
         }
+        print("⚠️ Using default profile")
+        return default_profile
 
     def get_display_name(self):
         if self.user_profile:
@@ -195,7 +201,9 @@ Start by greeting the user warmly using their first name: {first_name}."""
 
     def get_first_name(self):
         if self.user_profile:
-            return self.user_profile.get('firstName', 'User')
+            # Get first name from profile, default to 'User'
+            first_name = self.user_profile.get('firstName', 'User')
+            return first_name
         return "User"
 
     def update_activity(self):
@@ -284,23 +292,9 @@ Message: {user_prompt}
 
 {database_context if database_context else ""}
 
-Please respond helpfully and personally to {user_first_name}.
+Remember to address the user by their first name "{user_first_name}" in your response.
 """
     return enhanced_prompt
-
-def dynamodb_to_python(item):
-    """Legacy function for backward compatibility"""
-    result = {}
-    for key, value in item.items():
-        if 'S' in value:
-            result[key] = value['S']
-        elif 'N' in value:
-            result[key] = float(value['N']) if '.' in value['N'] else int(value['N'])
-        elif 'BOOL' in value:
-            result[key] = value['BOOL']
-        elif 'M' in value:
-            result[key] = dynamodb_to_python(value['M'])
-    return result
 
 @app.get("/")
 async def root():
@@ -350,11 +344,18 @@ async def chat(request: ChatRequest):
         session = get_user_session(request.user_id)
         user_first_name = session.get_first_name()
         
-        enhanced_prompt = enhance_prompt_with_context(request.prompt, session)
+        print(f"🎯 Processing chat for: {user_first_name} (ID: {request.user_id})")
+        
+        # For the first message, ensure we use a fresh context with the user's name
+        if len(session.chat_context) <= 1:  # Only system message
+            enhanced_prompt = f"Hello, my name is {user_first_name}. {request.prompt}"
+        else:
+            enhanced_prompt = enhance_prompt_with_context(request.prompt, session)
         
         session.add_message("user", enhanced_prompt)
         
         print(f"💬 {user_first_name}: {request.prompt}")
+        print(f"📋 Context messages: {len(session.chat_context)}")
         
         # Use non-streaming approach for better reliability
         try:
@@ -373,6 +374,7 @@ async def chat(request: ChatRequest):
             session.greeted = True
         
         print(f"✅ B-Max responded to {user_first_name}")
+        print(f"💡 Response: {response_text[:100]}...")
         
         return {
             "response": response_text,
@@ -387,41 +389,4 @@ async def chat(request: ChatRequest):
         raise
     except Exception as e:
         print(f"❌ Chat error: {e}")
-        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
-
-@app.get("/session/{user_id}")
-async def get_session_info(user_id: str):
-    if user_id not in user_sessions:
-        return {"error": "Session not found"}
-    
-    session = user_sessions[user_id]
-    return {
-        "user_id": session.user_id,
-        "username": session.get_display_name(),
-        "first_name": session.get_first_name(),
-        "company": session.user_profile.get('companyName', 'Unknown') if session.user_profile else 'Unknown',
-        "position": session.user_profile.get('position', 'Unknown') if session.user_profile else 'Unknown',
-        "message_count": len(session.chat_context) - 1,
-        "last_active": session.last_active.isoformat(),
-    }
-
-@app.delete("/session/{user_id}")
-async def clear_session(user_id: str):
-    if user_id in user_sessions:
-        del user_sessions[user_id]
-        return {"message": "Session cleared successfully"}
-    return {"message": "Session not found"}
-
-if __name__ == "__main__":
-    print("🚀 Starting B-Max AI Assistant...")
-    print("💬 Endpoint: POST /chat")
-    print("🔧 Health: GET /health")
-    print("📊 Database:", "Connected" if dynamodb else "Disconnected")
-    print("🤖 Ollama:", "Connected" if ollama_available else "Disconnected")
-    
-    uvicorn.run(
-        app, 
-        host="0.0.0.0", 
-        port=int(os.getenv("PORT", 8000)),
-        access_log=True
-    )
+        raise HTTPException(status_code=500,
