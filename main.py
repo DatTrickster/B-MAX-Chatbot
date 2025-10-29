@@ -69,6 +69,56 @@ class ChatRequest(BaseModel):
     prompt: str
     user_id: str = "guest"
 
+# --- Use the same DynamoDB helper as your SMTP function ---
+def dd_to_py(item):
+    """Convert DynamoDB item to Python dict - same as your SMTP function"""
+    if not item:
+        return {}
+    result = {}
+    for k, v in item.items():
+        if 'S' in v:
+            result[k] = v['S']
+        elif 'N' in v:
+            n = v['N']
+            result[k] = int(n) if n.isdigit() else float(n)
+        elif 'BOOL' in v:
+            result[k] = v['BOOL']
+        elif 'SS' in v:
+            result[k] = v['SS']
+        elif 'M' in v:
+            result[k] = dd_to_py(v['M'])
+        elif 'L' in v:
+            result[k] = [dd_to_py(el) for el in v['L']]
+    return result
+
+def get_user_profile_by_scan(user_id):
+    """Find user profile by scanning - same as your SMTP function"""
+    try:
+        resp = dynamodb.scan(
+            TableName=DYNAMODB_TABLE_USERS,
+            FilterExpression="userId = :uid",
+            ExpressionAttributeValues={":uid": {"S": user_id}}
+        )
+        items = resp.get("Items", [])
+        return dd_to_py(items[0]) if items else None
+    except Exception as e:
+        print(f"❌ Error scanning for user profile: {e}")
+        return None
+
+def get_user_profile_by_email(email):
+    """Find user profile by email scanning"""
+    try:
+        resp = dynamodb.scan(
+            TableName=DYNAMODB_TABLE_USERS,
+            FilterExpression="email = :email",
+            ExpressionAttributeValues={":email": {"S": email}}
+        )
+        items = resp.get("Items", [])
+        return dd_to_py(items[0]) if items else None
+    except Exception as e:
+        print(f"❌ Error scanning for user by email: {e}")
+        return None
+
 class UserSession:
     def __init__(self, user_id):
         self.user_id = user_id
@@ -79,7 +129,7 @@ class UserSession:
         
         print(f"🎯 Creating session for user_id: {user_id}")
         
-        # Load user profile FIRST before creating system prompt
+        # Load user profile using the same logic as SMTP function
         self.load_user_profile()
         
         # Set up system prompt AFTER profile is loaded
@@ -127,49 +177,8 @@ Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 IMPORTANT: Start your first response with "Hi {first_name}! 👋" and always use their name in responses."""
 
-    def find_user_profile_by_cognito_username(self, cognito_username: str):
-        """Find user profile by Cognito username (scan by email or other field)"""
-        try:
-            if not dynamodb:
-                return None
-                
-            print(f"🔍 Searching for user profile with Cognito username: {cognito_username}")
-            
-            # First, try to find by email (assuming Cognito username might be email)
-            if '@' in cognito_username:
-                response = dynamodb.scan(
-                    TableName=DYNAMODB_TABLE_USERS,
-                    FilterExpression='email = :email',
-                    ExpressionAttributeValues={':email': {'S': cognito_username}}
-                )
-                if response.get('Items') and len(response['Items']) > 0:
-                    print(f"✅ Found user by email: {cognito_username}")
-                    return self.dynamodb_to_python_enhanced(response['Items'][0])
-            
-            # If not found by email, try to find by other fields or scan all
-            # This is a fallback - you might want to add a cognitoUsername field to your UserProfiles
-            response = dynamodb.scan(
-                TableName=DYNAMODB_TABLE_USERS,
-                Limit=100  # Adjust as needed
-            )
-            
-            for item in response.get('Items', []):
-                user_data = self.dynamodb_to_python_enhanced(item)
-                # Check if this user matches the Cognito username somehow
-                # You might need to add logic here based on your user matching
-                if user_data.get('email') == cognito_username:
-                    print(f"✅ Found user by email match: {cognito_username}")
-                    return user_data
-            
-            print(f"❌ No user profile found for Cognito username: {cognito_username}")
-            return None
-            
-        except Exception as e:
-            print(f"❌ Error searching for user profile: {e}")
-            return None
-
     def load_user_profile(self):
-        """Load user profile from UserProfiles table - handle both UUID and Cognito usernames"""
+        """Load user profile using the same scanning logic as your SMTP function"""
         try:
             if not dynamodb:
                 self.user_profile = self.create_default_profile()
@@ -177,54 +186,54 @@ IMPORTANT: Start your first response with "Hi {first_name}! 👋" and always use
 
             print(f"🔍 Loading profile for: {self.user_id}")
             
-            # First, try direct lookup (if it's a UUID)
-            try:
-                response = dynamodb.get_item(
-                    TableName=DYNAMODB_TABLE_USERS,
-                    Key={'userId': {'S': self.user_id}}
-                )
-                if 'Item' in response:
-                    self.user_profile = self.dynamodb_to_python_enhanced(response['Item'])
-                    print(f"✅ Profile loaded via direct lookup: {self.user_id}")
-                    print(f"   firstName: {self.user_profile.get('firstName', 'NOT FOUND')}")
+            # Strategy 1: Try direct scan by userId (same as SMTP function)
+            profile = get_user_profile_by_scan(self.user_id)
+            if profile:
+                self.user_profile = profile
+                print(f"✅ Profile found via userId scan: {self.user_id}")
+                print(f"   firstName: {profile.get('firstName', 'NOT FOUND')}")
+                print(f"   email: {profile.get('email', 'NOT FOUND')}")
+                return
+            
+            # Strategy 2: If userId looks like an email, try email scan
+            if '@' in self.user_id:
+                profile = get_user_profile_by_email(self.user_id)
+                if profile:
+                    self.user_profile = profile
+                    print(f"✅ Profile found via email scan: {self.user_id}")
+                    print(f"   firstName: {profile.get('firstName', 'NOT FOUND')}")
                     return
+            
+            # Strategy 3: Try to find by Cognito username mapping
+            # Scan all users and look for matching email or other identifier
+            print(f"🔍 Scanning all users to find match for: {self.user_id}")
+            try:
+                resp = dynamodb.scan(TableName=DYNAMODB_TABLE_USERS)
+                all_users = [dd_to_py(item) for item in resp.get('Items', [])]
+                
+                for user in all_users:
+                    # Check if email matches the userId (if userId is email)
+                    if user.get('email') == self.user_id:
+                        self.user_profile = user
+                        print(f"✅ Profile found by email match: {self.user_id}")
+                        return
+                    
+                    # Check if there's a cognitoUsername field that matches
+                    if user.get('cognitoUsername') == self.user_id:
+                        self.user_profile = user
+                        print(f"✅ Profile found by cognitoUsername match: {self.user_id}")
+                        return
+                        
             except Exception as e:
-                print(f"⚠️ Direct lookup failed, trying Cognito mapping: {e}")
+                print(f"❌ Error scanning all users: {e}")
             
-            # If direct lookup fails, try to find by Cognito username
-            self.user_profile = self.find_user_profile_by_cognito_username(self.user_id)
-            
-            if not self.user_profile:
-                print(f"❌ No profile found for: {self.user_id}")
-                self.user_profile = self.create_default_profile()
+            # If no profile found, use default
+            print(f"❌ No profile found for: {self.user_id}")
+            self.user_profile = self.create_default_profile()
                 
         except Exception as e:
             print(f"❌ Error loading user profile: {e}")
             self.user_profile = self.create_default_profile()
-
-    def dynamodb_to_python_enhanced(self, item):
-        """Enhanced DynamoDB to Python conversion that handles all attribute types"""
-        result = {}
-        for key, value in item.items():
-            if 'S' in value:
-                result[key] = value['S']
-            elif 'N' in value:
-                result[key] = float(value['N']) if '.' in value['N'] else int(value['N'])
-            elif 'BOOL' in value:
-                result[key] = value['BOOL']
-            elif 'M' in value:
-                result[key] = self.dynamodb_to_python_enhanced(value['M'])
-            elif 'L' in value:
-                result[key] = [self.dynamodb_to_python_enhanced({'item': item})['item'] for item in value['L']]
-            elif 'SS' in value:
-                result[key] = list(value['SS'])  # String Set
-            elif 'NS' in value:
-                result[key] = [float(n) if '.' in n else int(n) for n in value['NS']]  # Number Set
-            elif 'BS' in value:
-                result[key] = list(value['BS'])  # Binary Set
-            elif 'NULL' in value and value['NULL']:
-                result[key] = None
-        return result
 
     def create_default_profile(self):
         """Create a default profile when user not found"""
@@ -275,18 +284,96 @@ def cleanup_old_sessions():
     for user_id in expired_users:
         del user_sessions[user_id]
 
-# Add this endpoint to help with debugging
-@app.get("/api/find-user/{cognito_username}")
-async def find_user_by_cognito(cognito_username: str):
-    """Debug endpoint to find user profile by Cognito username"""
+# Debug endpoint to see all users
+@app.get("/api/all-users")
+async def get_all_users():
+    """Get all users for debugging"""
     try:
-        session = UserSession(cognito_username)
+        if not dynamodb:
+            return {"error": "Database unavailable"}
+        
+        resp = dynamodb.scan(TableName=DYNAMODB_TABLE_USERS)
+        users = [dd_to_py(item) for item in resp.get('Items', [])]
+        
+        # Return only safe fields (no passwords etc)
+        safe_users = []
+        for user in users:
+            safe_user = {
+                'userId': user.get('userId'),
+                'email': user.get('email'),
+                'firstName': user.get('firstName'),
+                'lastName': user.get('lastName'),
+                'companyName': user.get('companyName'),
+                'cognitoUsername': user.get('cognitoUsername')
+            }
+            safe_users.append(safe_user)
+        
         return {
-            "cognito_username": cognito_username,
-            "user_profile_found": session.user_profile is not None,
-            "user_profile": session.user_profile if session.user_profile else None,
-            "first_name": session.get_first_name()
+            "total_users": len(safe_users),
+            "users": safe_users
         }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/find-user/{identifier}")
+async def find_user_by_identifier(identifier: str):
+    """Find user by any identifier (userId, email, cognitoUsername)"""
+    try:
+        # Try all lookup methods
+        profile_by_id = get_user_profile_by_scan(identifier)
+        if profile_by_id:
+            return {
+                "identifier": identifier,
+                "found_by": "userId",
+                "profile": {
+                    "userId": profile_by_id.get('userId'),
+                    "firstName": profile_by_id.get('firstName'),
+                    "lastName": profile_by_id.get('lastName'),
+                    "email": profile_by_id.get('email'),
+                    "companyName": profile_by_id.get('companyName')
+                }
+            }
+        
+        # Try by email
+        if '@' in identifier:
+            profile_by_email = get_user_profile_by_email(identifier)
+            if profile_by_email:
+                return {
+                    "identifier": identifier,
+                    "found_by": "email",
+                    "profile": {
+                        "userId": profile_by_email.get('userId'),
+                        "firstName": profile_by_email.get('firstName'),
+                        "lastName": profile_by_email.get('lastName'),
+                        "email": profile_by_email.get('email'),
+                        "companyName": profile_by_email.get('companyName')
+                    }
+                }
+        
+        # Scan all users for any match
+        resp = dynamodb.scan(TableName=DYNAMODB_TABLE_USERS)
+        all_users = [dd_to_py(item) for item in resp.get('Items', [])]
+        
+        for user in all_users:
+            if user.get('email') == identifier or user.get('cognitoUsername') == identifier:
+                return {
+                    "identifier": identifier,
+                    "found_by": "scan_match",
+                    "profile": {
+                        "userId": user.get('userId'),
+                        "firstName": user.get('firstName'),
+                        "lastName": user.get('lastName'),
+                        "email": user.get('email'),
+                        "companyName": user.get('companyName')
+                    }
+                }
+        
+        return {
+            "identifier": identifier,
+            "found_by": "not_found",
+            "profile": None
+        }
+            
     except Exception as e:
         return {"error": str(e)}
 
@@ -299,7 +386,8 @@ async def root():
             "chat": "/chat (POST)",
             "health": "/health",
             "session_info": "/session/{user_id}",
-            "find_user": "/api/find-user/{cognito_username}"
+            "find_user": "/api/find-user/{identifier}",
+            "all_users": "/api/all-users"
         }
     }
 
