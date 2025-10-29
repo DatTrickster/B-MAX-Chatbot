@@ -238,12 +238,12 @@ def get_tender_information(query: str = None, user_id: str = None):
         if not dynamodb:
             return "Database currently unavailable"
         
-        # Simple implementation for demo - get recent tenders
+        # Get all relevant tender fields
         response = dynamodb.scan(
             TableName=DYNAMODB_TABLE_TENDERS,
-            Limit=5,
+            Limit=10,  # Increased limit to get more tenders
             Select='SPECIFIC_ATTRIBUTES',
-            ProjectionExpression='title, Category, closingDate, sourceAgency, status'
+            ProjectionExpression='title, Category, closingDate, sourceAgency, status, link, referenceNumber, contactEmail, contactName, contactNumber, sourceUrl'
         )
         
         items = response.get('Items', [])
@@ -264,23 +264,101 @@ def get_tender_information(query: str = None, user_id: str = None):
         return f"Error accessing tender database: {str(e)}"
 
 def format_tenders_for_ai(tenders):
-    """Format tender information for AI context"""
+    """Format tender information for AI context with all relevant fields"""
     if not tenders:
         return "No tender data available."
     
-    formatted = "Recent Tenders Available:\n"
+    formatted = "RECENT TENDERS AVAILABLE:\n\n"
     for i, tender in enumerate(tenders, 1):
-        title = tender.get('title', 'Unknown Title')[:60] + '...' if len(tender.get('title', '')) > 60 else tender.get('title', 'Unknown Title')
+        title = tender.get('title', 'Unknown Title')
         category = tender.get('Category', 'Uncategorized')
         closing_date = tender.get('closingDate', 'Unknown')
         agency = tender.get('sourceAgency', 'Unknown Agency')
         status = tender.get('status', 'Unknown')
+        reference_number = tender.get('referenceNumber', 'N/A')
+        link = tender.get('link', 'No link available')
+        contact_name = tender.get('contactName', 'N/A')
+        contact_email = tender.get('contactEmail', 'N/A')
+        contact_number = tender.get('contactNumber', 'N/A')
+        source_url = tender.get('sourceUrl', 'N/A')
         
-        formatted += f"{i}. {title}\n"
-        formatted += f"   Category: {category} | Agency: {agency}\n"
-        formatted += f"   Closes: {closing_date} | Status: {status}\n\n"
+        formatted += f"🚀 TENDER #{i}\n"
+        formatted += f"📋 Title: {title}\n"
+        formatted += f"🏷️ Reference: {reference_number}\n"
+        formatted += f"📊 Category: {category}\n"
+        formatted += f"🏢 Agency: {agency}\n"
+        formatted += f"📅 Closing Date: {closing_date}\n"
+        formatted += f"📈 Status: {status}\n"
+        
+        if contact_name != 'N/A' or contact_email != 'N/A' or contact_number != 'N/A':
+            formatted += f"👤 Contact Info:\n"
+            if contact_name != 'N/A':
+                formatted += f"   - Name: {contact_name}\n"
+            if contact_email != 'N/A':
+                formatted += f"   - Email: {contact_email}\n"
+            if contact_number != 'N/A':
+                formatted += f"   - Phone: {contact_number}\n"
+        
+        formatted += f"🔗 Documents: {link}\n"
+        formatted += f"🌐 Source: {source_url}\n"
+        formatted += "─" * 50 + "\n\n"
     
+    formatted += "💡 I can help you analyze these tenders, find specific opportunities, or provide recommendations based on your preferences!"
     return formatted
+
+def search_tenders_by_category(category: str):
+    """Search tenders by category"""
+    try:
+        if not dynamodb:
+            return None
+            
+        response = dynamodb.scan(
+            TableName=DYNAMODB_TABLE_TENDERS,
+            FilterExpression="contains(Category, :cat)",
+            ExpressionAttributeValues={":cat": {"S": category}},
+            Limit=5
+        )
+        
+        items = response.get('Items', [])
+        tenders = []
+        for item in items:
+            tender = {}
+            for key, value in item.items():
+                if 'S' in value:
+                    tender[key] = value['S']
+            tenders.append(tender)
+        
+        return tenders
+    except Exception as e:
+        print(f"❌ Error searching tenders by category: {e}")
+        return None
+
+def search_tenders_by_keyword(keyword: str):
+    """Search tenders by keyword in title"""
+    try:
+        if not dynamodb:
+            return None
+            
+        response = dynamodb.scan(
+            TableName=DYNAMODB_TABLE_TENDERS,
+            FilterExpression="contains(title, :kw)",
+            ExpressionAttributeValues={":kw": {"S": keyword}},
+            Limit=5
+        )
+        
+        items = response.get('Items', [])
+        tenders = []
+        for item in items:
+            tender = {}
+            for key, value in item.items():
+                if 'S' in value:
+                    tender[key] = value['S']
+            tenders.append(tender)
+        
+        return tenders
+    except Exception as e:
+        print(f"❌ Error searching tenders by keyword: {e}")
+        return None
 
 class UserSession:
     def __init__(self, user_id):
@@ -333,8 +411,10 @@ CRITICAL RULES - FOLLOW THESE EXACTLY:
 8. Focus on tender-related topics and procurement
 9. NEVER mention or reference other users or their information
 10. NEVER share any user profile details beyond what's necessary for the conversation
-11. When users ask about tenders, provide relevant tender information and recommendations
+11. When users ask about tenders, provide relevant tender information and recommendations from the database
 12. Use the user's preferences to personalize tender recommendations when appropriate
+13. ALWAYS include specific tender details like title, reference number, closing date, agency, and links when discussing tenders
+14. Make tender information easy to read with clear formatting
 
 User Profile (FOR CONTEXT ONLY - DO NOT SHARE):
 - First Name: {first_name} (USE THIS IN ALL RESPONSES)
@@ -349,6 +429,7 @@ Your capabilities:
 - Explain tender categories and requirements
 - Help with tender search strategies
 - Provide information about tender deadlines and procedures
+- Search and present specific tender opportunities with all relevant details
 
 Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
@@ -356,6 +437,7 @@ IMPORTANT:
 - Start conversations naturally based on the user's first message
 - Always use "{first_name}" but don't force it into every sentence
 - Focus on providing helpful tender information and recommendations
+- When discussing tenders, include key details: title, reference number, category, agency, closing date, status, and links
 - Never discuss other users or their data
 - Keep responses professional and tender-focused"""
 
@@ -476,11 +558,32 @@ def cleanup_old_sessions():
 def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
     """Enhance user prompt with tender context and personalization"""
     database_context = ""
-    tender_keywords = ['tender', 'tenders', 'procurement', 'bid', 'category', 'recommend', 'suggest', 'opportunity', 'RFP', 'RFQ']
+    tender_keywords = ['tender', 'tenders', 'procurement', 'bid', 'category', 'recommend', 'suggest', 'opportunity', 'RFP', 'RFQ', 'construction', 'IT', 'services', 'supply']
+    
+    # Check for specific category searches
+    category_keywords = {
+        'construction': ['construction', 'building', 'civil', 'engineering', 'infrastructure'],
+        'IT': ['IT', 'technology', 'software', 'hardware', 'computer', 'digital'],
+        'services': ['services', 'consulting', 'maintenance', 'cleaning', 'security'],
+        'supply': ['supply', 'goods', 'materials', 'equipment']
+    }
+    
+    user_prompt_lower = user_prompt.lower()
     
     # Add tender context if the message is tender-related
-    if any(keyword in user_prompt.lower() for keyword in tender_keywords):
-        database_context = get_tender_information(user_prompt, session.user_id)
+    if any(keyword in user_prompt_lower for keyword in tender_keywords):
+        # Check for specific category searches
+        specific_tenders = None
+        for category, keywords in category_keywords.items():
+            if any(keyword in user_prompt_lower for keyword in keywords):
+                specific_tenders = search_tenders_by_category(category)
+                if specific_tenders:
+                    database_context = format_tenders_for_ai(specific_tenders)
+                    break
+        
+        # If no specific category found, get general tenders
+        if not specific_tenders:
+            database_context = get_tender_information(user_prompt, session.user_id)
     
     user_first_name = session.get_first_name()
     
@@ -492,6 +595,7 @@ Message: {user_prompt}
 
 Remember to address the user by their first name "{user_first_name}" naturally in your response.
 Focus on providing helpful tender information and recommendations.
+When discussing tenders, include specific details like title, reference number, closing date, and links.
 """
     return enhanced_prompt
 
