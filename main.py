@@ -3,11 +3,13 @@ import uvicorn
 import json
 import boto3
 import time
+import re
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from difflib import SequenceMatcher
 
 load_dotenv()
 
@@ -33,7 +35,6 @@ try:
         region_name=AWS_REGION
     )
     
-    # Initialize Cognito client
     if COGNITO_USER_POOL_ID:
         cognito = boto3.client(
             'cognito-idp',
@@ -51,7 +52,7 @@ except Exception as e:
     dynamodb = None
     cognito = None
 
-# Try to import Ollama, but make it optional for health checks
+# Try to import Ollama
 try:
     from ollama import Client
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
@@ -74,7 +75,6 @@ except Exception as e:
 
 app = FastAPI(title="B-Max AI Assistant", version="1.0.0")
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -83,7 +83,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory session storage
 user_sessions = {}
 
 class ChatRequest(BaseModel):
@@ -112,42 +111,219 @@ def dd_to_py(item):
             result[k] = [dd_to_py(el) for el in v['L']]
     return result
 
+def scan_all_tenders():
+    """Scan ALL tenders from database with pagination"""
+    try:
+        if not dynamodb:
+            return []
+        
+        all_tenders = []
+        last_evaluated_key = None
+        
+        while True:
+            scan_params = {
+                'TableName': DYNAMODB_TABLE_TENDERS,
+                'Limit': 100  # Process in batches of 100
+            }
+            
+            if last_evaluated_key:
+                scan_params['ExclusiveStartKey'] = last_evaluated_key
+            
+            response = dynamodb.scan(**scan_params)
+            items = response.get('Items', [])
+            
+            for item in items:
+                tender = dd_to_py(item)
+                all_tenders.append(tender)
+            
+            last_evaluated_key = response.get('LastEvaluatedKey')
+            if not last_evaluated_key:
+                break
+        
+        print(f"📊 Scanned {len(all_tenders)} total tenders from database")
+        return all_tenders
+        
+    except Exception as e:
+        print(f"❌ Error scanning all tenders: {e}")
+        return []
+
+def calculate_relevance_score(tender, query, search_type="general"):
+    """Calculate relevance score for a tender based on query"""
+    score = 0
+    query_lower = query.lower()
+    
+    # Extract potential reference numbers from query
+    ref_patterns = re.findall(r'[A-Z0-9-/]+', query.upper())
+    
+    # Check for exact reference number match (highest priority)
+    tender_ref = str(tender.get('referenceNumber', '')).upper()
+    if tender_ref and any(ref in tender_ref for ref in ref_patterns if len(ref) > 3):
+        score += 1000  # Very high score for reference match
+        print(f"🎯 Exact reference match found: {tender_ref}")
+    
+    # Check title relevance
+    title = str(tender.get('title', '')).lower()
+    if title:
+        # Exact phrase match in title
+        if query_lower in title:
+            score += 100
+        # Word matches in title
+        query_words = query_lower.split()
+        for word in query_words:
+            if len(word) > 3 and word in title:
+                score += 20
+        # Fuzzy match for title
+        similarity = SequenceMatcher(None, query_lower, title).ratio()
+        score += similarity * 50
+    
+    # Check category relevance
+    category = str(tender.get('Category', '')).lower()
+    if category and category in query_lower:
+        score += 80
+    
+    # Check agency relevance
+    agency = str(tender.get('sourceAgency', '')).lower()
+    if agency:
+        if query_lower in agency or agency in query_lower:
+            score += 60
+        # Check for partial agency name matches
+        query_words = query_lower.split()
+        for word in query_words:
+            if len(word) > 3 and word in agency:
+                score += 15
+    
+    # Bonus for active/open status
+    status = str(tender.get('status', '')).lower()
+    if 'open' in status or 'active' in status:
+        score += 10
+    
+    # Check closing date (prefer sooner deadlines if available)
+    closing_date = tender.get('closingDate', '')
+    if closing_date and closing_date != 'No closing date':
+        try:
+            # Parse date and give bonus to upcoming deadlines
+            # This is a simple implementation - adjust based on your date format
+            score += 5
+        except:
+            pass
+    
+    return score
+
+def search_specific_tender(query):
+    """Search for a specific tender by reference or exact match"""
+    try:
+        all_tenders = scan_all_tenders()
+        
+        if not all_tenders:
+            return None
+        
+        # Look for reference number patterns
+        ref_patterns = re.findall(r'[A-Z0-9-/]+', query.upper())
+        
+        # First pass: exact reference match
+        for tender in all_tenders:
+            tender_ref = str(tender.get('referenceNumber', '')).upper()
+            if tender_ref:
+                for ref in ref_patterns:
+                    if len(ref) > 3 and ref in tender_ref:
+                        print(f"✅ Found exact reference match: {tender_ref}")
+                        return [tender]
+        
+        # Second pass: exact title match
+        query_lower = query.lower()
+        for tender in all_tenders:
+            title = str(tender.get('title', '')).lower()
+            if query_lower in title or title in query_lower:
+                if len(query_lower) > 10 or len(title) > 10:  # Avoid short false matches
+                    print(f"✅ Found exact title match: {title}")
+                    return [tender]
+        
+        # Third pass: score-based fuzzy matching
+        scored_tenders = []
+        for tender in all_tenders:
+            score = calculate_relevance_score(tender, query, "specific")
+            if score > 50:  # Only include tenders with decent relevance
+                scored_tenders.append((score, tender))
+        
+        scored_tenders.sort(reverse=True, key=lambda x: x[0])
+        
+        if scored_tenders:
+            print(f"✅ Found {len(scored_tenders)} relevant matches (showing top result)")
+            return [scored_tenders[0][1]]
+        
+        return None
+        
+    except Exception as e:
+        print(f"❌ Error in specific tender search: {e}")
+        return None
+
+def smart_tender_search(query, limit=5):
+    """Intelligently search tenders based on query"""
+    try:
+        print(f"🔍 Smart search for: {query}")
+        
+        # Check if this is a specific tender request
+        specific_indicators = ['reference', 'tender number', 'ref:', 'number:', 'specific']
+        query_lower = query.lower()
+        
+        is_specific_search = any(indicator in query_lower for indicator in specific_indicators)
+        has_reference_pattern = bool(re.search(r'[A-Z]{2,}[-/]?\d+', query.upper()))
+        
+        if is_specific_search or has_reference_pattern:
+            print("🎯 Detected specific tender search")
+            result = search_specific_tender(query)
+            if result:
+                return result
+        
+        # General search: scan all and rank by relevance
+        all_tenders = scan_all_tenders()
+        
+        if not all_tenders:
+            return []
+        
+        # Score all tenders
+        scored_tenders = []
+        for tender in all_tenders:
+            score = calculate_relevance_score(tender, query)
+            if score > 0:  # Only include tenders with some relevance
+                scored_tenders.append((score, tender))
+        
+        # Sort by score (highest first)
+        scored_tenders.sort(reverse=True, key=lambda x: x[0])
+        
+        # Return top N results
+        top_tenders = [tender for score, tender in scored_tenders[:limit]]
+        
+        print(f"✅ Found {len(scored_tenders)} relevant tenders, returning top {len(top_tenders)}")
+        if top_tenders and scored_tenders:
+            print(f"📊 Top score: {scored_tenders[0][0]}, Lowest score: {scored_tenders[-1][0] if len(scored_tenders) > 0 else 'N/A'}")
+        
+        return top_tenders
+        
+    except Exception as e:
+        print(f"❌ Error in smart tender search: {e}")
+        return []
+
 def get_tender_information(query: str = None, user_id: str = None):
-    """Get REAL tender information from ProcessedTender database"""
+    """Get REAL tender information with smart search"""
     try:
         if not dynamodb:
             print("❌ DynamoDB client not available")
             return "Database currently unavailable"
         
-        print(f"🔍 Scanning REAL data from table: {DYNAMODB_TABLE_TENDERS}")
+        if query:
+            # Use smart search with query
+            tenders = smart_tender_search(query, limit=5)
+        else:
+            # Get recent tenders if no query
+            tenders = scan_all_tenders()[:5]
         
-        # Get ALL fields from the table to ensure we capture everything
-        response = dynamodb.scan(
-            TableName=DYNAMODB_TABLE_TENDERS,
-            Limit=8  # Get recent tenders
-        )
+        if not tenders:
+            print("❌ No relevant tenders found")
+            return "No relevant tenders found in the database matching your query."
         
-        items = response.get('Items', [])
-        print(f"📊 Found {len(items)} REAL tender items in database")
-        
-        if not items:
-            print("❌ No REAL tenders found in database")
-            return "No tenders found in the database. The system is currently being populated with tender data."
-        
-        # Convert all items to Python dicts
-        tenders_info = []
-        for item in items:
-            tender = dd_to_py(item)
-            tenders_info.append(tender)
-        
-        print(f"✅ Processed {len(tenders_info)} REAL tenders from database")
-        
-        # Log first tender for debugging
-        if tenders_info:
-            first_tender = tenders_info[0]
-            print(f"📝 Sample tender data - Title: {first_tender.get('title', 'N/A')}, Category: {first_tender.get('Category', 'N/A')}")
-        
-        return format_real_tenders_for_ai(tenders_info)
+        print(f"✅ Returning {len(tenders)} tenders")
+        return format_real_tenders_for_ai(tenders)
         
     except Exception as e:
         print(f"❌ Database error: {e}")
@@ -160,7 +336,6 @@ def format_real_tenders_for_ai(tenders):
     
     formatted = "REAL TENDERS FROM DATABASE:\n\n"
     for i, tender in enumerate(tenders, 1):
-        # Use actual field names from your DynamoDB table
         title = tender.get('title', 'No title available')
         category = tender.get('Category', 'Uncategorized')
         closing_date = tender.get('closingDate', 'No closing date')
@@ -196,56 +371,38 @@ def format_real_tenders_for_ai(tenders):
             formatted += f"🌐 Source: {source_url}\n"
         formatted += "─" * 50 + "\n\n"
     
-    formatted += "💡 These are REAL tenders from the database. I can help you analyze them or find specific opportunities!"
+    formatted += f"💡 Showing {len(tenders)} most relevant tender(s) from the database."
     return formatted
 
-def search_tenders_by_category(category: str):
-    """Search REAL tenders by category in the database"""
+def search_tenders_by_category(category: str, limit=5):
+    """Search REAL tenders by category"""
     try:
         if not dynamodb:
             return None
-            
-        print(f"🔍 Searching REAL tenders for category: {category}")
-            
-        response = dynamodb.scan(
-            TableName=DYNAMODB_TABLE_TENDERS,
-            FilterExpression="contains(Category, :cat)",
-            ExpressionAttributeValues={":cat": {"S": category}},
-            Limit=6
-        )
         
-        items = response.get('Items', [])
-        tenders = []
-        for item in items:
-            tender = dd_to_py(item)
-            tenders.append(tender)
+        print(f"🔍 Searching tenders for category: {category}")
         
-        print(f"✅ Found {len(tenders)} REAL tenders for category: {category}")
-        return tenders
+        all_tenders = scan_all_tenders()
+        
+        # Filter by category
+        category_tenders = []
+        for tender in all_tenders:
+            tender_category = str(tender.get('Category', '')).lower()
+            if category.lower() in tender_category:
+                category_tenders.append(tender)
+        
+        # Sort by relevance (status, closing date, etc.)
+        category_tenders.sort(key=lambda t: (
+            'open' in str(t.get('status', '')).lower(),
+            t.get('closingDate', '') != 'No closing date'
+        ), reverse=True)
+        
+        result = category_tenders[:limit]
+        print(f"✅ Found {len(category_tenders)} tenders in category, returning top {len(result)}")
+        return result
+        
     except Exception as e:
-        print(f"❌ Error searching REAL tenders by category: {e}")
-        return None
-
-def get_recent_tenders(limit: int = 5):
-    """Get recent tenders from the database"""
-    try:
-        if not dynamodb:
-            return None
-            
-        response = dynamodb.scan(
-            TableName=DYNAMODB_TABLE_TENDERS,
-            Limit=limit
-        )
-        
-        items = response.get('Items', [])
-        tenders = []
-        for item in items:
-            tender = dd_to_py(item)
-            tenders.append(tender)
-        
-        return tenders
-    except Exception as e:
-        print(f"❌ Error getting recent REAL tenders: {e}")
+        print(f"❌ Error searching tenders by category: {e}")
         return None
 
 class UserSession:
@@ -260,10 +417,8 @@ class UserSession:
         
         print(f"🎯 Creating session for user_id: {user_id}")
         
-        # Load user profile
         self.load_user_profile()
         
-        # Set up system prompt AFTER profile is loaded
         username = self.get_display_name()
         first_name = self.get_first_name()
         self.chat_context = [
@@ -288,11 +443,13 @@ CRITICAL RULES - FOLLOW THESE EXACTLY:
 8. Focus on tender-related topics and procurement
 9. NEVER mention or reference other users or their information
 10. ALWAYS provide REAL tender information from the database when available
+11. When showing tender results, present them clearly with all relevant details
 
 AVAILABLE TENDER CATEGORIES:
 {available_categories_str}
 
 Your capabilities:
+- Search for specific tenders by reference number or exact criteria
 - Answer questions about REAL tenders from the database
 - Provide tender recommendations based on REAL data
 - Explain tender categories and requirements
@@ -302,10 +459,12 @@ Your capabilities:
 Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 IMPORTANT: 
+- The system scans the ENTIRE database and returns the most relevant results
+- When users ask for specific tenders (by reference, name, etc.), find the exact match
+- Only show the top 5 most relevant tenders unless otherwise specified
 - Only discuss REAL tenders from the database
 - Never invent fake tender examples
-- If database has no tenders, be honest about it
-- Focus on providing helpful information based on REAL data"""
+- If database has no tenders, be honest about it"""
 
     def load_user_profile(self):
         """Simple profile loading"""
@@ -331,7 +490,6 @@ IMPORTANT:
         self.chat_context.append({"role": role, "content": content})
         self.total_messages += 1
         
-        # Keep reasonable context length
         if len(self.chat_context) > 21:
             system_message = self.chat_context[0]
             recent_messages = self.chat_context[-20:]
@@ -355,10 +513,9 @@ def cleanup_old_sessions():
         del user_sessions[user_id]
 
 def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
-    """Enhance user prompt with REAL tender context"""
+    """Enhance user prompt with REAL tender context using smart search"""
     database_context = ""
     
-    # Enhanced category mapping
     category_keywords = {
         'Engineering Services': ['engineering', 'engineer', 'technical', 'design', 'infrastructure'],
         'IT Services': ['IT', 'technology', 'software', 'hardware', 'computer', 'digital', 'tech'],
@@ -378,29 +535,24 @@ def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
         if any(keyword in user_prompt_lower for keyword in keywords):
             matched_categories.append(category)
     
-    # Add REAL tender context if the message is tender-related
-    tender_keywords = ['tender', 'tenders', 'procurement', 'bid', 'category', 'recommend', 'suggest', 'opportunity', 'RFP', 'RFQ']
+    # Check if this is a tender-related query
+    tender_keywords = ['tender', 'tenders', 'procurement', 'bid', 'category', 'recommend', 
+                       'suggest', 'opportunity', 'RFP', 'RFQ', 'reference', 'find', 'show', 'search']
     
     if any(keyword in user_prompt_lower for keyword in tender_keywords) or matched_categories:
-        print(f"🔍 Looking for REAL tenders related to: {user_prompt}")
+        print(f"🔍 Processing tender-related query: {user_prompt}")
         
         if matched_categories:
-            # Try to find tenders in specific categories
+            # Search by category
             for category in matched_categories:
-                specific_tenders = search_tenders_by_category(category)
+                specific_tenders = search_tenders_by_category(category, limit=5)
                 if specific_tenders:
                     database_context = format_real_tenders_for_ai(specific_tenders)
                     database_context = f"🔍 REAL Tenders in {category}:\n\n{database_context}"
                     break
-            
-            # If no specific category tenders found, get general tenders
-            if not database_context:
-                database_context = get_tender_information()
-                if "No tenders found" not in database_context:
-                    database_context = f"📊 No specific tenders found for those categories. Here are recent REAL tenders:\n\n{database_context}"
         else:
-            # Get general REAL tenders
-            database_context = get_tender_information()
+            # Use smart search with the full query
+            database_context = get_tender_information(query=user_prompt)
     
     user_first_name = session.get_first_name()
     
@@ -408,10 +560,10 @@ def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
 User: {user_first_name}
 Message: {user_prompt}
 
-{database_context if database_context else "No tender data available for this query."}
+{database_context if database_context else "No specific tender data needed for this query."}
 
 CRITICAL: Only provide REAL tender information from the database. Never invent fake examples.
-If no tenders are found, be honest and say so.
+The system has searched the entire database and provided the most relevant results.
 Address the user as {user_first_name}.
 """
     return enhanced_prompt
@@ -429,14 +581,13 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    # Test database connection
     db_status = "connected" if dynamodb else "disconnected"
     tender_count = 0
     
     if dynamodb:
         try:
-            response = dynamodb.scan(TableName=DYNAMODB_TABLE_TENDERS, Limit=1)
-            tender_count = len(response.get('Items', []))
+            all_tenders = scan_all_tenders()
+            tender_count = len(all_tenders)
         except Exception as e:
             db_status = f"error: {str(e)}"
     
@@ -444,7 +595,7 @@ async def health_check():
         "status": "ok",
         "service": "B-Max AI Assistant",
         "dynamodb": db_status,
-        "tender_count": tender_count,
+        "total_tenders": tender_count,
         "cognito": "connected" if cognito else "disabled",
         "ollama": "connected" if ollama_available else "disconnected",
         "active_sessions": len(user_sessions),
@@ -466,13 +617,11 @@ async def chat(request: ChatRequest):
         
         print(f"🎯 Using session - First name: {user_first_name}")
         
-        # Enhance prompt with REAL tender context
+        # Enhance prompt with REAL tender context using smart search
         enhanced_prompt = enhance_prompt_with_context(request.prompt, session)
         
-        # Add enhanced user message to context
         session.add_message("user", enhanced_prompt)
         
-        # Get AI response
         try:
             response = client.chat(
                 'deepseek-v3.1:671b-cloud', 
@@ -483,7 +632,6 @@ async def chat(request: ChatRequest):
             print(f"❌ Ollama API error: {e}")
             response_text = f"I apologize {user_first_name}, but I'm having trouble processing your request right now. Please try again in a moment."
         
-        # Add assistant response to context
         session.add_message("assistant", response_text)
         
         print(f"✅ Response sent to {user_first_name}")
