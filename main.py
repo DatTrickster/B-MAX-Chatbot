@@ -114,6 +114,69 @@ def dd_to_py(item):
             result[k] = [dd_to_py(el) for el in v['L']]
     return result
 
+def get_user_profile_by_user_id(user_id: str):
+    """Find user profile by userId (UUID)"""
+    try:
+        resp = dynamodb.scan(
+            TableName=DYNAMODB_TABLE_USERS,
+            FilterExpression="userId = :uid",
+            ExpressionAttributeValues={":uid": {"S": user_id}}
+        )
+        items = resp.get("Items", [])
+        return dd_to_py(items[0]) if items else None
+    except Exception as e:
+        print(f"❌ Error scanning for user profile: {e}")
+        return None
+
+def get_user_profile_by_email(email: str):
+    """Find user profile by email"""
+    try:
+        resp = dynamodb.scan(
+            TableName=DYNAMODB_TABLE_USERS,
+            FilterExpression="email = :email",
+            ExpressionAttributeValues={":email": {"S": email}}
+        )
+        items = resp.get("Items", [])
+        return dd_to_py(items[0]) if items else None
+    except Exception as e:
+        print(f"❌ Error scanning for user by email: {e}")
+        return None
+
+def get_cognito_user_by_username(username: str):
+    """Get user details from Cognito by username"""
+    try:
+        if not cognito or not COGNITO_USER_POOL_ID:
+            print("❌ Cognito not configured")
+            return None
+            
+        response = cognito.admin_get_user(
+            UserPoolId=COGNITO_USER_POOL_ID,
+            Username=username
+        )
+        
+        user_attributes = {}
+        for attr in response.get('UserAttributes', []):
+            user_attributes[attr['Name']] = attr['Value']
+        
+        cognito_user = {
+            'username': response.get('Username'),
+            'user_id': response.get('UserSub'),  # This is the UUID
+            'email': user_attributes.get('email'),
+            'email_verified': user_attributes.get('email_verified', 'false') == 'true',
+            'status': response.get('UserStatus'),
+            'enabled': response.get('Enabled', False),
+            'created': response.get('UserCreateDate'),
+            'modified': response.get('UserLastModifiedDate'),
+            'attributes': user_attributes
+        }
+        
+        print(f"✅ Found Cognito user: {username} -> UUID: {cognito_user['user_id']}")
+        return cognito_user
+        
+    except Exception as e:
+        print(f"❌ Error fetching Cognito user {username}: {e}")
+        return None
+
 def embed_tender_table():
     """Embed the entire ProcessedTender table into memory for AI context"""
     global embedded_tender_table, last_table_update
@@ -169,7 +232,6 @@ def embed_tender_table():
                 statuses[status] = statuses.get(status, 0) + 1
             
             print(f"📊 ProcessedTender Table Stats - Categories: {len(categories)}, Agencies: {len(agencies)}, Statuses: {len(statuses)}")
-            print(f"🏷️ Top Categories: {list(categories.keys())[:5]}")
         
         return all_tenders
         
@@ -189,13 +251,13 @@ def get_embedded_table():
     
     return embedded_tender_table
 
-def format_embedded_table_for_ai(tenders):
+def format_embedded_table_for_ai(tenders, user_preferences=None):
     """Format the entire embedded ProcessedTender table for AI consumption"""
     if not tenders:
         return "EMBEDDED PROCESSEDTENDER TABLE: No data available"
     
     # Create a comprehensive summary of the table
-    table_summary = "COMPLETE PROCESSEDTENDER DATABASE EMBEDDED IN CONTEXT:\n\n"
+    table_summary = "COMPLETE TENDER DATABASE CONTEXT:\n\n"
     
     # Table statistics
     total_tenders = len(tenders)
@@ -212,154 +274,113 @@ def format_embedded_table_for_ai(tenders):
         agencies[agency] = agencies.get(agency, 0) + 1
         statuses[status] = statuses.get(status, 0) + 1
     
-    table_summary += f"📊 PROCESSEDTENDER DATABASE OVERVIEW:\n"
+    table_summary += f"📊 DATABASE OVERVIEW:\n"
     table_summary += f"• Total Tenders: {total_tenders}\n"
     table_summary += f"• Categories: {len(categories)}\n"
     table_summary += f"• Agencies: {len(agencies)}\n"
     table_summary += f"• Statuses: {len(statuses)}\n\n"
     
+    # Add user preferences context if available
+    if user_preferences:
+        preferred_categories = user_preferences.get('preferredCategories', [])
+        preferred_sites = user_preferences.get('preferredSites', [])
+        
+        if preferred_categories:
+            table_summary += f"🎯 USER PREFERENCES:\n"
+            table_summary += f"• Preferred Categories: {', '.join(preferred_categories)}\n"
+            if preferred_sites:
+                table_summary += f"• Preferred Sites: {len(preferred_sites)} sources\n"
+            table_summary += "\n"
+    
     # Top categories
     table_summary += "🏷️ TOP CATEGORIES:\n"
-    for category, count in sorted(categories.items(), key=lambda x: x[1], reverse=True)[:8]:
+    for category, count in sorted(categories.items(), key=lambda x: x[1], reverse=True)[:6]:
         table_summary += f"• {category}: {count} tenders\n"
     
     table_summary += "\n"
     
-    # Recent tenders sample with ALL fields from ProcessedTender
-    table_summary += "📋 SAMPLE OF AVAILABLE TENDERS (with all ProcessedTender fields):\n"
-    for i, tender in enumerate(tenders[:10], 1):
-        title = tender.get('title', 'No title')
+    # Sample tenders with key information
+    table_summary += "📋 SAMPLE TENDERS:\n"
+    for i, tender in enumerate(tenders[:8], 1):
+        title = tender.get('title', 'No title')[:80] + '...' if len(tender.get('title', '')) > 80 else tender.get('title', 'No title')
         category = tender.get('Category', 'Unknown')
         agency = tender.get('sourceAgency', 'Unknown')
         closing_date = tender.get('closingDate', 'Unknown')
         status = tender.get('status', 'Unknown')
         reference_number = tender.get('referenceNumber', 'N/A')
-        contact_name = tender.get('contactName', 'N/A')
-        contact_email = tender.get('contactEmail', 'N/A')
-        contact_number = tender.get('contactNumber', 'N/A')
-        link = tender.get('link', 'N/A')
-        source_url = tender.get('sourceUrl', 'N/A')
         
-        table_summary += f"🚀 TENDER #{i}:\n"
-        table_summary += f"   📋 Title: {title}\n"
-        table_summary += f"   🏷️ Reference: {reference_number}\n"
-        table_summary += f"   📊 Category: {category}\n"
-        table_summary += f"   🏢 Agency: {agency}\n"
-        table_summary += f"   📅 Closing: {closing_date}\n"
-        table_summary += f"   📈 Status: {status}\n"
-        table_summary += f"   👤 Contact: {contact_name} | {contact_email} | {contact_number}\n"
-        table_summary += f"   🔗 Documents: {link}\n"
-        table_summary += f"   🌐 Source: {source_url}\n\n"
+        table_summary += f"{i}. {title}\n"
+        table_summary += f"   📊 {category} | 🏢 {agency}\n"
+        table_summary += f"   📅 {closing_date} | 📈 {status}\n"
+        table_summary += f"   🏷️ {reference_number}\n\n"
     
-    table_summary += "💡 You have COMPLETE access to ALL ProcessedTender data including titles, references, categories, agencies, closing dates, contacts, and document links. Use this comprehensive information to provide accurate, detailed answers and recommendations."
+    table_summary += "💡 You have access to all tender data including titles, references, categories, agencies, closing dates, contacts, and document links."
     
     return table_summary
 
-def get_intelligent_insights(user_prompt: str, tenders: list):
-    """Generate intelligent insights based on the embedded ProcessedTender table"""
+def get_personalized_recommendations(user_prompt: str, tenders: list, user_preferences: dict):
+    """Get personalized recommendations based on user preferences"""
     if not tenders:
-        return "No data available for analysis."
+        return []
     
-    insights = []
     user_prompt_lower = user_prompt.lower()
+    preferred_categories = user_preferences.get('preferredCategories', [])
+    preferred_sites = user_preferences.get('preferredSites', [])
     
-    # Category distribution insights
-    categories = {}
-    for tender in tenders:
-        category = tender.get('Category', 'Unknown')
-        categories[category] = categories.get(category, 0) + 1
+    scored_tenders = []
     
-    # Urgency insights
-    urgent_tenders = []
     for tender in tenders:
+        score = 0
+        match_reasons = []
+        
+        # Category preference matching (highest weight)
+        tender_category = tender.get('Category', '')
+        if tender_category in preferred_categories:
+            score += 10
+            match_reasons.append(f"Matches your preferred category: {tender_category}")
+        
+        # Site preference matching
+        tender_source = tender.get('sourceUrl', '')
+        for site in preferred_sites:
+            if site in tender_source:
+                score += 5
+                match_reasons.append("From your preferred source")
+                break
+        
+        # Query relevance
+        title = tender.get('title', '').lower()
+        if any(word in title for word in user_prompt_lower.split()):
+            score += 3
+            match_reasons.append("Matches your search query")
+        
+        # Urgency scoring
         closing_date = tender.get('closingDate', '')
         if closing_date:
             try:
                 closing_dt = datetime.fromisoformat(closing_date.replace('Z', '+00:00'))
                 days_until_close = (closing_dt - datetime.now()).days
                 if 0 <= days_until_close <= 7:
-                    urgent_tenders.append(tender)
+                    score += 4
+                    match_reasons.append("Closing soon")
             except:
                 pass
-    
-    # Agency insights
-    agencies = {}
-    for tender in tenders:
-        agency = tender.get('sourceAgency', 'Unknown')
-        agencies[agency] = agencies.get(agency, 0) + 1
-    
-    # Contact availability insights
-    tenders_with_contacts = [t for t in tenders if t.get('contactName') != 'N/A' and t.get('contactName')]
-    
-    # Generate insights based on user query
-    if any(word in user_prompt_lower for word in ['category', 'categories', 'type']):
-        top_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]
-        insights.append(f"📊 Category Distribution: {', '.join([f'{cat} ({count})' for cat, count in top_categories])}")
-    
-    if any(word in user_prompt_lower for word in ['urgent', 'soon', 'closing', 'deadline']):
-        insights.append(f"⏰ Urgent Opportunities: {len(urgent_tenders)} tenders closing within 7 days")
-    
-    if any(word in user_prompt_lower for word in ['agency', 'department', 'municipality']):
-        top_agencies = sorted(agencies.items(), key=lambda x: x[1], reverse=True)[:5]
-        insights.append(f"🏢 Top Agencies: {', '.join([f'{agency} ({count})' for agency, count in top_agencies])}")
-    
-    if any(word in user_prompt_lower for word in ['contact', 'email', 'phone', 'person']):
-        insights.append(f"📞 Contact Info Available: {len(tenders_with_contacts)} tenders have contact details")
-    
-    # General insights
-    if not insights:
-        insights.append(f"📈 Database contains {len(tenders)} tenders across {len(categories)} categories")
-        insights.append(f"🏢 {len(agencies)} different agencies publishing opportunities")
-        if urgent_tenders:
-            insights.append(f"⏰ {len(urgent_tenders)} tenders closing within 7 days")
-        if tenders_with_contacts:
-            insights.append(f"📞 {len(tenders_with_contacts)} tenders with contact information")
-    
-    return " | ".join(insights)
-
-def find_relevant_tenders(user_prompt: str, tenders: list):
-    """Find the most relevant tenders based on user query"""
-    if not tenders:
-        return []
-    
-    user_prompt_lower = user_prompt.lower()
-    relevant_tenders = []
-    
-    # Score tenders based on relevance to query
-    for tender in tenders:
-        score = 0
-        
-        # Title relevance
-        title = tender.get('title', '').lower()
-        if any(word in title for word in user_prompt_lower.split()):
-            score += 3
-        
-        # Category relevance
-        category = tender.get('Category', '').lower()
-        if any(word in category for word in user_prompt_lower.split()):
-            score += 2
-        
-        # Agency relevance
-        agency = tender.get('sourceAgency', '').lower()
-        if any(word in agency for word in user_prompt_lower.split()):
-            score += 1
-        
-        # Status relevance
-        status = tender.get('status', '').lower()
-        if 'active' in status or 'open' in status:
-            score += 1
         
         if score > 0:
-            relevant_tenders.append((tender, score))
+            scored_tenders.append({
+                'tender': tender,
+                'score': score,
+                'match_reasons': match_reasons
+            })
     
-    # Sort by relevance score and return top 5
-    relevant_tenders.sort(key=lambda x: x[1], reverse=True)
-    return [tender for tender, score in relevant_tenders[:5]]
+    # Sort by score and return top recommendations
+    scored_tenders.sort(key=lambda x: x['score'], reverse=True)
+    return scored_tenders[:6]
 
 class UserSession:
     def __init__(self, user_id):
         self.user_id = user_id
         self.user_profile = None
+        self.cognito_user = None
         self.chat_context = []
         self.last_active = datetime.now()
         self.total_messages = 0
@@ -367,56 +388,100 @@ class UserSession:
         print(f"🎯 Creating session for user_id: {user_id}")
         self.load_user_profile()
         
-        username = self.get_display_name()
         first_name = self.get_first_name()
         self.chat_context = [
-            {"role": "system", "content": self.create_system_prompt(username, first_name)}
+            {"role": "system", "content": self.create_system_prompt(first_name)}
         ]
         
-        print(f"✅ Session created - Name: {first_name}")
+        print(f"✅ Session created - Name: {first_name}, Profile loaded: {self.user_profile is not None}")
 
-    def create_system_prompt(self, username: str, first_name: str):
+    def create_system_prompt(self, first_name: str):
         # Get the embedded table for system context
         tenders = get_embedded_table()
-        table_context = format_embedded_table_for_ai(tenders) if tenders else "ProcessedTender database not currently available."
+        user_preferences = self.get_user_preferences()
         
-        return f"""You are B-Max, an AI assistant for TenderConnect with COMPLETE ACCESS to the entire ProcessedTender database.
+        table_context = format_embedded_table_for_ai(tenders, user_preferences) if tenders else "Tender database not currently available."
+        
+        return f"""You are B-Max, an AI assistant for TenderConnect. You have complete access to the tender database.
 
 CRITICAL RULES - FOLLOW THESE EXACTLY:
-1. You have the ENTIRE ProcessedTender database embedded in your context with ALL fields
-2. Use the complete table data to provide accurate, comprehensive answers
-3. ALWAYS address the user by their first name "{first_name}"
-4. Provide data-driven insights and recommendations using REAL data
-5. Reference specific tenders, categories, agencies, contacts, and deadlines from the embedded table
-6. Never invent or create fake tender data - you have access to all real ProcessedTender data
-7. Be proactive in suggesting opportunities based on complete database knowledge
+1. ALWAYS address the user by their first name "{first_name}" in EVERY response
+2. NEVER introduce yourself or mention that you have database access
+3. Provide natural, conversational responses
+4. Use the embedded database to give accurate, specific information
+5. Focus on the user's preferences and needs
+6. Format responses clearly with proper spacing and emojis for readability
+7. Be warm, professional, and helpful
 
-AVAILABLE TENDER FIELDS IN PROCESSEDTENDER TABLE:
-- title, Category, sourceAgency, closingDate, status, referenceNumber
-- contactName, contactEmail, contactNumber, link, sourceUrl
-- And all other fields from the ProcessedTender table
+USER PROFILE:
+- First Name: {first_name}
+- Preferred Categories: {', '.join(user_preferences.get('preferredCategories', [])) if user_preferences.get('preferredCategories') else 'Not specified'}
+- Company: {self.user_profile.get('companyName', 'Not specified') if self.user_profile else 'Not specified'}
 
-YOUR CAPABILITIES WITH EMBEDDED PROCESSEDTENDER TABLE:
-- Access to ALL tenders with complete field information
-- Ability to analyze patterns and trends across the entire database
-- Provide statistical insights and data-driven recommendations
-- Compare and contrast different opportunities with full details
-- Identify urgent opportunities and provide contact information
-- Reference specific tender details like reference numbers and document links
-
-EMBEDDED PROCESSEDTENDER DATABASE CONTEXT:
+DATABASE CONTEXT:
 {table_context}
 
-Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-IMPORTANT: 
-- You have COMPLETE knowledge of all available tenders in ProcessedTender table
-- Use this comprehensive knowledge to provide the best recommendations
-- Reference actual data points, contact details, and specific tender information
-- Be specific about what's available in the database including reference numbers and links"""
+RESPONSE GUIDELINES:
+- Keep responses natural and conversational
+- Use proper formatting with line breaks for readability
+- Focus on providing valuable information without self-references
+- Personalize recommendations based on user preferences
+- Use emojis sparingly to enhance readability
+- Never mention your capabilities or database access"""
 
     def load_user_profile(self):
-        self.user_profile = {
+        """Load user profile using Cognito to get UUID, then UserProfiles table"""
+        try:
+            if not dynamodb:
+                self.user_profile = self.create_default_profile()
+                return
+
+            print(f"🔍 Loading profile for: {self.user_id}")
+            
+            # Strategy 1: Check if user_id is already a UUID
+            if len(self.user_id) > 20:  # Likely a UUID
+                profile = get_user_profile_by_user_id(self.user_id)
+                if profile:
+                    self.user_profile = profile
+                    print(f"✅ Profile found via UUID: {self.user_id}")
+                    print(f"   firstName: {profile.get('firstName', 'NOT FOUND')}")
+                    return
+            
+            # Strategy 2: Query Cognito to get UUID from username
+            print(f"🔍 Querying Cognito for: {self.user_id}")
+            self.cognito_user = get_cognito_user_by_username(self.user_id)
+            
+            if self.cognito_user:
+                cognito_uuid = self.cognito_user['user_id']
+                print(f"✅ Found Cognito UUID: {cognito_uuid} for username: {self.user_id}")
+                
+                # Now lookup in UserProfiles using the Cognito UUID
+                profile = get_user_profile_by_user_id(cognito_uuid)
+                if profile:
+                    self.user_profile = profile
+                    print(f"✅ Profile found via Cognito UUID: {cognito_uuid}")
+                    print(f"   firstName: {profile.get('firstName', 'NOT FOUND')}")
+                    return
+            
+            # Strategy 3: Try direct email lookup
+            if '@' in self.user_id:
+                profile = get_user_profile_by_email(self.user_id)
+                if profile:
+                    self.user_profile = profile
+                    print(f"✅ Profile found via email: {self.user_id}")
+                    return
+            
+            # If no profile found, use default
+            print(f"❌ No profile found for: {self.user_id}")
+            self.user_profile = self.create_default_profile()
+                
+        except Exception as e:
+            print(f"❌ Error loading user profile: {e}")
+            self.user_profile = self.create_default_profile()
+
+    def create_default_profile(self):
+        """Create a default profile when user not found"""
+        default_profile = {
             'firstName': 'User',
             'lastName': '',
             'companyName': 'Unknown',
@@ -424,12 +489,33 @@ IMPORTANT:
             'location': 'Unknown',
             'preferredCategories': []
         }
+        print("⚠️ Using default profile")
+        return default_profile
+
+    def get_user_preferences(self):
+        """Get user preferences from profile"""
+        if not self.user_profile:
+            return {}
+        
+        return {
+            'preferredCategories': self.user_profile.get('preferredCategories', []),
+            'preferredSites': self.user_profile.get('preferredSites', []),
+            'companyName': self.user_profile.get('companyName', ''),
+            'position': self.user_profile.get('position', '')
+        }
 
     def get_display_name(self):
-        return self.user_profile.get('firstName', 'User')
+        if self.user_profile:
+            first_name = self.user_profile.get('firstName', 'User')
+            last_name = self.user_profile.get('lastName', '')
+            return f"{first_name} {last_name}".strip()
+        return "User"
 
     def get_first_name(self):
-        return self.user_profile.get('firstName', 'User')
+        if self.user_profile:
+            first_name = self.user_profile.get('firstName', 'User')
+            return first_name
+        return "User"
 
     def update_activity(self):
         self.last_active = datetime.now()
@@ -460,46 +546,41 @@ def cleanup_old_sessions():
         del user_sessions[user_id]
 
 def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
-    """Enhance prompt with embedded ProcessedTender table context and intelligent insights"""
+    """Enhance prompt with embedded table context and personalization"""
     
     # Get the embedded table
     tenders = get_embedded_table()
+    user_preferences = session.get_user_preferences()
     
     if not tenders:
-        database_context = "⚠️ ProcessedTender database not currently available."
-        insights = "No insights available."
-        relevant_tenders_context = ""
+        database_context = "No tender data available."
+        personalized_context = ""
     else:
-        # Generate intelligent insights based on the embedded data
-        insights = get_intelligent_insights(user_prompt, tenders)
+        # Get personalized recommendations
+        personalized_recommendations = get_personalized_recommendations(user_prompt, tenders, user_preferences)
         
-        # Find relevant tenders for the specific query
-        relevant_tenders = find_relevant_tenders(user_prompt, tenders)
-        
-        # Format relevant tenders context
-        if relevant_tenders:
-            relevant_tenders_context = "🎯 RELEVANT TENDERS FOR YOUR QUERY:\n\n"
-            for i, tender in enumerate(relevant_tenders, 1):
+        if personalized_recommendations:
+            personalized_context = "🎯 PERSONALIZED RECOMMENDATIONS:\n\n"
+            for i, rec in enumerate(personalized_recommendations, 1):
+                tender = rec['tender']
+                reasons = rec['match_reasons']
+                
                 title = tender.get('title', 'No title')
                 category = tender.get('Category', 'Unknown')
                 agency = tender.get('sourceAgency', 'Unknown')
                 closing_date = tender.get('closingDate', 'Unknown')
-                status = tender.get('status', 'Unknown')
                 reference_number = tender.get('referenceNumber', 'N/A')
                 
-                relevant_tenders_context += f"{i}. {title}\n"
-                relevant_tenders_context += f"   📊 {category} | 🏢 {agency}\n"
-                relevant_tenders_context += f"   📅 {closing_date} | 📈 {status}\n"
-                relevant_tenders_context += f"   🏷️ Ref: {reference_number}\n\n"
+                personalized_context += f"{i}. **{title}**\n"
+                personalized_context += f"   📊 {category} | 🏢 {agency}\n"
+                personalized_context += f"   📅 {closing_date} | 🏷️ {reference_number}\n"
+                if reasons:
+                    personalized_context += f"   ✅ {', '.join(reasons)}\n"
+                personalized_context += "\n"
         else:
-            relevant_tenders_context = "No specific tenders match your query, but I have access to all tenders in the database."
+            personalized_context = ""
         
-        # For specific queries, provide focused context
-        if any(word in user_prompt.lower() for word in ['stat', 'analytics', 'overview', 'summary']):
-            database_context = format_embedded_table_for_ai(tenders)
-        else:
-            # Provide a concise context for regular queries
-            database_context = f"COMPLETE PROCESSEDTENDER DATABASE ACCESS: {len(tenders)} tenders available with full details including contacts, references, and document links."
+        database_context = format_embedded_table_for_ai(tenders, user_preferences)
     
     user_first_name = session.get_first_name()
     
@@ -507,21 +588,18 @@ def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
 User: {user_first_name}
 Message: {user_prompt}
 
-PROCESSEDTENDER DATABASE CONTEXT:
+DATABASE CONTEXT:
 {database_context}
 
-INTELLIGENT INSIGHTS:
-{insights}
-
-{relevant_tenders_context}
+{personalized_context}
 
 INSTRUCTIONS:
-- You have COMPLETE access to the ProcessedTender database with ALL fields
-- Provide data-driven, specific recommendations with reference numbers
-- Include contact information and document links when available
-- Reference actual tenders from the embedded table
-- Use your full knowledge of the database to provide comprehensive answers
-- Be proactive in suggesting relevant opportunities with specific details
+- Respond naturally to {user_first_name}
+- Use the database context to provide accurate information
+- Personalize responses based on user preferences
+- Format responses clearly with proper spacing
+- Never mention database access or your capabilities
+- Focus on being helpful and conversational
 """
     return enhanced_prompt
 
@@ -533,10 +611,9 @@ async def root():
     tender_count = len(tenders) if tenders else 0
     
     return {
-        "message": "B-Max AI Assistant with Embedded ProcessedTender Database",
+        "message": "B-Max AI Assistant",
         "status": "healthy" if ollama_available else "degraded",
         "embedded_tenders": tender_count,
-        "last_update": last_table_update.isoformat() if last_table_update else None,
         "timestamp": datetime.now().isoformat()
     }
 
@@ -545,24 +622,10 @@ async def health_check():
     tenders = get_embedded_table()
     tender_count = len(tenders) if tenders else 0
     
-    # Database statistics
-    categories = set()
-    agencies = set()
-    if tenders:
-        for tender in tenders:
-            categories.add(tender.get('Category', 'Unknown'))
-            agencies.add(tender.get('sourceAgency', 'Unknown'))
-    
     return {
         "status": "ok",
-        "service": "B-Max AI Assistant with Embedded ProcessedTender DB",
-        "embedded_data": {
-            "total_tenders": tender_count,
-            "unique_categories": len(categories),
-            "unique_agencies": len(agencies),
-            "last_updated": last_table_update.isoformat() if last_table_update else None
-        },
-        "ollama": "connected" if ollama_available else "disconnected",
+        "service": "B-Max AI Assistant",
+        "embedded_tenders": tender_count,
         "active_sessions": len(user_sessions),
         "timestamp": datetime.now().isoformat()
     }
@@ -580,7 +643,7 @@ async def chat(request: ChatRequest):
         session = get_user_session(request.user_id)
         user_first_name = session.get_first_name()
         
-        print(f"🎯 Using session with embedded ProcessedTender table - First name: {user_first_name}")
+        print(f"🎯 Using session - First name: {user_first_name}")
         
         # Enhance prompt with embedded table context
         enhanced_prompt = enhance_prompt_with_context(request.prompt, session)
@@ -602,7 +665,7 @@ async def chat(request: ChatRequest):
         # Add assistant response to context
         session.add_message("assistant", response_text)
         
-        print(f"✅ Response sent using embedded ProcessedTender database context")
+        print(f"✅ Response sent to {user_first_name}")
         
         return {
             "response": response_text,
@@ -610,8 +673,7 @@ async def chat(request: ChatRequest):
             "username": user_first_name,
             "full_name": session.get_display_name(),
             "timestamp": datetime.now().isoformat(),
-            "session_active": True,
-            "embedded_data_used": True
+            "session_active": True
         }
         
     except HTTPException:
@@ -620,31 +682,17 @@ async def chat(request: ChatRequest):
         print(f"❌ Chat error: {e}")
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
-@app.post("/refresh-embedded-data")
-async def refresh_embedded_data():
-    """Force refresh of the embedded ProcessedTender table"""
-    try:
-        tenders = embed_tender_table()
-        return {
-            "message": "Embedded ProcessedTender data refreshed successfully",
-            "tenders_embedded": len(tenders) if tenders else 0,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error refreshing embedded data: {str(e)}")
-
 # Initialize embedded table on startup
 @app.on_event("startup")
 async def startup_event():
-    print("🚀 Initializing embedded ProcessedTender table...")
+    print("🚀 Initializing embedded tender table...")
     embed_tender_table()
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    print("🚀 Starting B-Max AI Assistant with Embedded ProcessedTender Database...")
+    print("🚀 Starting B-Max AI Assistant...")
     print("💬 Endpoint: POST /chat")
     print("🔧 Health: GET /health")
-    print("🔄 Refresh: POST /refresh-embedded-data")
     print("📊 Database:", "Connected" if dynamodb else "Disconnected")
     print("🤖 Ollama:", "Connected" if ollama_available else "Disconnected")
     print(f"🌐 Server running on port {port}")
