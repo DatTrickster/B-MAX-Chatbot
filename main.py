@@ -364,7 +364,8 @@ def extract_available_agencies(tenders):
     available_agencies = agencies
     print(f"🔄 Updated available agencies: {len(agencies)} agencies found")
     if agencies:
-        print(f"📋 Agencies: {', '.join(sorted(list(agencies))[:200]}...")  # Show first 200 chars
+        # FIXED: Corrected the f-string syntax
+        print(f"📋 Agencies: {', '.join(sorted(list(agencies)))[:200]}...")  # Show first 200 chars
     
     return agencies
 
@@ -646,7 +647,7 @@ CRITICAL RULES - FOLLOW THESE EXACTLY:
 5. Focus on the user's preferences and needs
 6. Format responses clearly with proper spacing and emojis for readability
 7. Be warm, professional, and helpful
-8. **CRITICAL FOR DOCUMENT LINKS**: When providing document links, ALWAYS include actual clickable URLs in Markdown format like [Download Document PDF](https://example.com/document.pdf). The 'link' field contains the actual document, while 'sourceUrl' is just the information page.
+8. **CRITICAL FOR DOCUMENT LINKS**: When providing document links, ALWAYS include actual clickable URLs from the 'link' field in Markdown format like [Download Document PDF](https://example.com/document.pdf). The 'link' field contains the actual document, while 'sourceUrl' is just the information page.
 9. **SCOPE LIMITATION**: If a question is completely outside the scope of tenders, business opportunities, or general assistance, respond with: "I'm sorry, but I'm specifically designed to assist with tender-related questions and business opportunities through TenderConnect. I can help you find tender information, document links, categories, and recommendations."
 10. **AGENCY AWARENESS**: You can find tenders from ANY agency in the database. When users mention specific agencies, use the available agencies list to provide relevant tenders. The system automatically detects all agencies from the database.
 
