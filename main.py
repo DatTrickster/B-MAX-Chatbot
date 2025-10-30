@@ -115,6 +115,7 @@ class ContentFilter:
         text_lower = text.lower()
         for keyword in self.inappropriate_keywords:
             if keyword in text_lower:
+
                 return True
         return False
 
@@ -184,6 +185,7 @@ def get_user_profile_by_email(email: str):
 def get_cognito_user_by_username(username: str):
     try:
         if not cognito or not COGNITO_USER_POOL_ID:
+
             return None
         response = cognito.admin_get_user(
             UserPoolId=COGNITO_USER_POOL_ID,
@@ -204,6 +206,8 @@ def get_cognito_user_by_username(username: str):
             'modified': response.get('UserLastModifiedDate'),
             'attributes': user_attributes
         }
+
+
     except Exception as e:
         print(f"Error fetching Cognito user {username}: {e}")
         return None
@@ -265,37 +269,50 @@ def format_tender_with_links(tender):
     response += f"• **Closing Date**: {closing_date}\n"
     response += f"• **Status**: {status}\n\n"
 
-    if primary_links or secondary_links:
+    if primary_links:
         response += "**Document Links**\n"
         for link in primary_links:
             url = link['url']
             response += f"**PRIMARY DOCUMENT**: [Download Tender Documents]({url})\n"
-        for i, link in enumerate(secondary_links, 1):
-            link_type = link['type'].replace('_', ' ').title()
-            url = link['url']
-            response += f"{i}. [{link_type}]({url})\n"
-        response += "\n"
-    else:
+        if secondary_links:
+            response += "\n"
+    elif secondary_links:
+        response += "**Document Links**\n"
+
+    for i, link in enumerate(secondary_links, 1):
+        link_type = link['type'].replace('_', ' ').title()
+        url = link['url']
+        response += f"{i}. [{link_type}]({url})\n"
+
+    if not document_links:
         response += "• **Document Links**: No direct links available\n\n"
 
     source_url = tender.get('sourceUrl')
     if source_url and source_url not in [l['url'] for l in document_links]:
         response += f"• **Source Page**: [View Original Tender]({source_url})\n"
 
-    response += "─" * 40 + "\n"
+
+    response += "\n" + "─" * 40 + "\n"
     return response
 
 # --- Agency & Embed ---
 def extract_available_agencies(tenders):
     global available_agencies
     agencies = {t.get('sourceAgency', '').strip() for t in tenders if t.get('sourceAgency')}
+
+
+
+
     available_agencies = agencies
+
     return agencies
+
 
 def embed_tender_table():
     global embedded_tender_table, last_table_update
     try:
         if not dynamodb:
+
             return None
         print("Embedding ProcessedTender table...")
         all_tenders = []
@@ -303,9 +320,13 @@ def embed_tender_table():
         while True:
             resp = dynamodb.scan(TableName=DYNAMODB_TABLE_TENDERS, ExclusiveStartKey=last_evaluated_key) if last_evaluated_key else dynamodb.scan(TableName=DYNAMODB_TABLE_TENDERS)
             items = resp.get('Items', [])
+
+
+
             for item in items:
                 all_tenders.append(dd_to_py(item))
             last_evaluated_key = resp.get('LastEvaluatedKey')
+
             if not last_evaluated_key:
                 break
         embedded_tender_table = all_tenders
@@ -326,6 +347,10 @@ def get_embedded_table():
 
 # --- Advanced Search ---
 def advanced_search(user_prompt: str, tenders: List[Dict], user_preferences: Dict) -> List[Dict]:
+
+
+
+
     prompt_low = user_prompt.lower()
     words = [w for w in prompt_low.split() if len(w) > 2]
     pref_cats = {c.lower() for c in user_preferences.get("preferredCategories", [])}
@@ -343,8 +368,10 @@ def advanced_search(user_prompt: str, tenders: List[Dict], user_preferences: Dic
         score = 0
         reasons = []
 
+
         if any(a in agency for a in words) or any(a in prompt_low for a in agency.split()):
             score += 30; reasons.append("Agency match")
+
         elif words and any(difflib.SequenceMatcher(None, w, agency).ratio() > 0.7 for w in words):
             score += 25; reasons.append("Fuzzy agency")
 
@@ -352,6 +379,15 @@ def advanced_search(user_prompt: str, tenders: List[Dict], user_preferences: Dic
         if any(w in cat for w in words): score += 12; reasons.append("Category keyword")
 
         if any(w in title for w in words): score += 10; reasons.append("Title keyword")
+
+
+
+
+
+
+
+
+
         if words:
             best = max((difflib.SequenceMatcher(None, w, title).ratio() for w in words), default=0)
             if best > 0.6: score += int(best * 10); reasons.append("Fuzzy title")
@@ -360,9 +396,12 @@ def advanced_search(user_prompt: str, tenders: List[Dict], user_preferences: Dic
         if desc and any(w in desc for w in words): score += 6; reasons.append("Description keyword")
         if any(s in source_url for s in pref_sites): score += 7; reasons.append("Preferred source")
 
+
+
         primary = [l for l in extract_document_links(tender) if l.get("is_primary")]
         if primary: score += 9; reasons.append("Primary document")
         elif extract_document_links(tender): score += 3; reasons.append("Has document")
+
 
         cd = tender.get("closingDate", "")
         if cd and cd != "Unknown":
@@ -371,6 +410,9 @@ def advanced_search(user_prompt: str, tenders: List[Dict], user_preferences: Dic
                 if 0 <= (dt - datetime.now()).days <= 7:
                     score += 5; reasons.append("Closing soon")
             except: pass
+
+
+
 
         if score > 0:
             scored.append({"tender": tender, "score": score, "reasons": reasons})
@@ -383,19 +425,25 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
     if not tenders:
         return "No tender data available"
     total = len(tenders)
-    with_links = sum(1 for t in tenders if extract_document_links(t))
+
     categories = {}
     agencies = {}
+    with_links = sum(1 for t in tenders if extract_document_links(t))
     for t in tenders:
         cat = t.get('Category', 'Unknown')
         agency = t.get('sourceAgency', 'Unknown')
         categories[cat] = categories.get(cat, 0) + 1
+
+
         agencies[agency] = agencies.get(agency, 0) + 1
 
     summary = f"**TENDER DATABASE** ({total} tenders)\n\n"
-    summary += f"• **With Documents**: {with_links}\n"
+    summary += f"• **With Documents**: {with_links} ({with_links/total*100:.1f}%)\n"
     summary += f"• **Categories**: {len(categories)}\n"
     summary += f"• **Agencies**: {len(agencies)}\n\n"
+
+
+
 
     if available_agencies:
         summary += "**Available Agencies**\n"
@@ -422,46 +470,77 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
     return summary
 
 # --- Session ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 class UserSession:
     def __init__(self, user_id):
         self.user_id = user_id
         self.user_profile = None
+
         self.chat_context = []
         self.last_active = datetime.now()
         self.total_messages = 0
+
+
         self.load_user_profile()
         self.initialize_chat_context(self.get_first_name())
+
+
 
     def initialize_chat_context(self, first_name: str):
         tenders = get_embedded_table()
         prefs = self.get_user_preferences()
         table_ctx = format_embedded_table_for_ai(tenders, prefs) if tenders else "No data"
-        system_prompt = f"""You are B-Max, a friendly and helpful AI assistant for TenderConnect.
-
-TONE & STYLE:
-- Address user as **{first_name}**
-- Be warm, personal, and encouraging
-- Use emojis in greetings & tips
-- NEVER use emojis in tender listings
-- Keep tender details clean and professional
+        system_prompt = f"""You are B-Max, a professional AI assistant for TenderConnect.
 
 RULES:
-1. Use only the embedded tender database
-2. Never invent data
-3. Document links: ONLY from `link` field
-4. If no match: Be helpful and suggest keywords
+1. Address user as **{first_name}**
+2. Use **only** the embedded tender database
+3. **Never** invent data
+4. Format cleanly: **Title**, • Bullet, [Link](url)
+5. If no match: "No matching tenders found"
+6. Document links: **Only** from `link` field
 
 USER:
 - Name: {first_name}
+
+
+
+
+
+
 - Company: {self.user_profile.get('companyName', 'Not specified') if self.user_profile else 'Not specified'}
 
 DATABASE:
 {table_ctx}
 
-RESPONSE FORMAT:
-- Start with friendly intro
-- List tenders cleanly
-- End with helpful tip if needed
+RESPONSE STYLE:
+- Professional
+- Structured
+- No fluff
+- Use exact DB values
+
 """
         if not self.chat_context:
             self.chat_context = [{"role": "system", "content": system_prompt}]
@@ -475,23 +554,66 @@ RESPONSE FORMAT:
                 return
             profile = get_user_profile_by_user_id(self.user_id)
             if not profile and '@' in self.user_id:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
                 profile = get_user_profile_by_email(self.user_id)
             if not profile:
                 cog_user = get_cognito_user_by_username(self.user_id)
                 if cog_user and cog_user.get('user_id'):
                     profile = get_user_profile_by_user_id(cog_user['user_id'])
             self.user_profile = profile or {'firstName': 'User'}
+
+
+
+
+
+
+
         except Exception as e:
             self.user_profile = {'firstName': 'User'}
+
 
     def get_first_name(self):
         return self.user_profile.get('firstName', 'User') if self.user_profile else "User"
 
+
+
+
+
+
     def get_user_preferences(self):
+
+
         return {
             'preferredCategories': self.user_profile.get('preferredCategories', []) if self.user_profile else [],
             'preferredSites': self.user_profile.get('preferredSites', []) if self.user_profile else []
+
+
         }
+
+
+
+
+
+
+
+
+
+
 
     def update_activity(self):
         self.last_active = datetime.now()
@@ -504,6 +626,8 @@ RESPONSE FORMAT:
         if len(self.chat_context) > 20:
             self.chat_context = [self.chat_context[0]] + self.chat_context[-19:]
 
+
+
     def get_chat_context(self):
         if not self.chat_context or self.chat_context[0]["role"] != "system":
             self.initialize_chat_context(self.get_first_name())
@@ -512,6 +636,9 @@ RESPONSE FORMAT:
 def get_user_session(user_id: str) -> UserSession:
     if user_id not in user_sessions:
         user_sessions[user_id] = UserSession(user_id)
+
+
+
     session = user_sessions[user_id]
     session.update_activity()
     return session
@@ -522,17 +649,19 @@ def cleanup_old_sessions():
     for uid in expired:
         del user_sessions[uid]
 
+
+
+
+
+
 # --- Prompt Enhancement ---
 def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
     tenders = get_embedded_table()
     prefs = session.get_user_preferences()
-    first_name = session.get_first_name()
     search_results = advanced_search(user_prompt, tenders, prefs) if tenders else []
 
     if search_results:
-        count = len(search_results)
-        intro = f"Hi {first_name}! I found **{count} tender{'s' if count != 1 else ''}** matching your request:\n\n"
-        personalized_context = intro + "**Recommended Tenders**\n\n"
+        personalized_context = "**Recommended Tenders**\n\n"
         for i, rec in enumerate(search_results, 1):
             tender_formatted = format_tender_with_links(rec["tender"])
             reasons = rec["reasons"]
@@ -542,18 +671,22 @@ def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
         personalized_context = personalized_context.strip()
     else:
         personalized_context = (
-            f"No matching tenders found, {first_name}.\n\n"
-            "Try searching with:\n"
-            "• Agency name (e.g., *eTenders*, *City of Cape Town*)\n"
+            "**No matching tenders found.**\n\n"
+            "Try using keywords from:\n"
+            "• Tender title\n"
             "• Reference number\n"
-            "• Category: *IT Services*, *Construction*, *Supplies*\n\n"
-            "Example: _'construction Johannesburg'_"
+            "• Agency name\n"
+            "• Category (e.g., IT Services, Construction)\n\n"
+            "Example: _'eTenders construction'_"
         )
 
     database_context = format_embedded_table_for_ai(tenders, prefs) if tenders else "No data"
 
     return f"""
-User: {first_name}
+User: {session.get_first_name()}
+
+
+
 Message: {user_prompt}
 
 DATABASE:
@@ -563,12 +696,13 @@ RECOMMENDATIONS:
 {personalized_context}
 
 INSTRUCTIONS:
-- Be warm and personal
-- Use first name
-- Use emojis only in intro/tips
-- NEVER use emojis in tender details
-- Keep tender sections clean
+- Use only data above
+- Format professionally
+- Never invent
+
+
 """
+
 
 # --- Endpoints ---
 @app.get("/")
@@ -599,6 +733,8 @@ async def health_check():
 
 @app.get("/agencies")
 async def get_agencies():
+
+
     return {
         "agencies": sorted(list(available_agencies)),
         "count": len(available_agencies),
@@ -611,18 +747,40 @@ async def chat(request: ChatRequest):
         if not ollama_available:
             raise HTTPException(status_code=503, detail="AI service unavailable")
         should_respond, msg = content_filter.should_respond(request.prompt)
+
         if not should_respond:
             return {"response": msg, "filtered": True, **_base_response(request)}
+
+
+
+
+
+
+
+
+
         session = get_user_session(request.user_id)
         enhanced = enhance_prompt_with_context(request.prompt, session)
         session.add_message("user", enhanced)
+
+
         try:
             resp = client.chat('deepseek-v3.1:671b-cloud', messages=session.get_chat_context())
             response_text = resp['message']['content']
         except Exception as e:
             response_text = f"I apologize {session.get_first_name()}, but I'm having technical issues. Please try again."
+
         session.add_message("assistant", response_text)
         return {"response": response_text, "filtered": False, **_base_response(request, session)}
+
+
+
+
+
+
+
+
+
     except HTTPException:
         raise
     except Exception as e:
@@ -643,6 +801,15 @@ def _base_response(request, session=None):
 async def get_session_info(user_id: str):
     session = user_sessions.get(user_id)
     if not session:
+
+
+
+
+
+
+
+
+
         return {"error": "Session not found"}
     return {
         "user_id": user_id,
@@ -654,8 +821,18 @@ async def get_session_info(user_id: str):
 
 @app.on_event("startup")
 async def startup_event():
+
     embed_tender_table()
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
+
+
+
+
+
+
+
+
     uvicorn.run(app, host="0.0.0.0", port=port)
