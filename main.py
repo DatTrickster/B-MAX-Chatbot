@@ -265,29 +265,24 @@ def format_tender_with_links(tender):
     response += f"• **Closing Date**: {closing_date}\n"
     response += f"• **Status**: {status}\n\n"
 
-    if primary_links:
+    if primary_links or secondary_links:
         response += "**Document Links**\n"
         for link in primary_links:
             url = link['url']
             response += f"**PRIMARY DOCUMENT**: [Download Tender Documents]({url})\n"
-        if secondary_links:
-            response += "\n"
-    elif secondary_links:
-        response += "**Document Links**\n"
-
-    for i, link in enumerate(secondary_links, 1):
-        link_type = link['type'].replace('_', ' ').title()
-        url = link['url']
-        response += f"{i}. [{link_type}]({url})\n"
-
-    if not document_links:
+        for i, link in enumerate(secondary_links, 1):
+            link_type = link['type'].replace('_', ' ').title()
+            url = link['url']
+            response += f"{i}. [{link_type}]({url})\n"
+        response += "\n"
+    else:
         response += "• **Document Links**: No direct links available\n\n"
 
     source_url = tender.get('sourceUrl')
     if source_url and source_url not in [l['url'] for l in document_links]:
         response += f"• **Source Page**: [View Original Tender]({source_url})\n"
 
-    response += "\n" + "─" * 40 + "\n"
+    response += "─" * 40 + "\n"
     return response
 
 # --- Agency & Embed ---
@@ -388,9 +383,9 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
     if not tenders:
         return "No tender data available"
     total = len(tenders)
+    with_links = sum(1 for t in tenders if extract_document_links(t))
     categories = {}
     agencies = {}
-    with_links = sum(1 for t in tenders if extract_document_links(t))
     for t in tenders:
         cat = t.get('Category', 'Unknown')
         agency = t.get('sourceAgency', 'Unknown')
@@ -398,7 +393,7 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
         agencies[agency] = agencies.get(agency, 0) + 1
 
     summary = f"**TENDER DATABASE** ({total} tenders)\n\n"
-    summary += f"• **With Documents**: {with_links} ({with_links/total*100:.1f}%)\n"
+    summary += f"• **With Documents**: {with_links}\n"
     summary += f"• **Categories**: {len(categories)}\n"
     summary += f"• **Agencies**: {len(agencies)}\n\n"
 
@@ -441,15 +436,20 @@ class UserSession:
         tenders = get_embedded_table()
         prefs = self.get_user_preferences()
         table_ctx = format_embedded_table_for_ai(tenders, prefs) if tenders else "No data"
-        system_prompt = f"""You are B-Max, a professional AI assistant for TenderConnect.
+        system_prompt = f"""You are B-Max, a friendly and helpful AI assistant for TenderConnect.
+
+TONE & STYLE:
+- Address user as **{first_name}**
+- Be warm, personal, and encouraging
+- Use emojis in greetings & tips
+- NEVER use emojis in tender listings
+- Keep tender details clean and professional
 
 RULES:
-1. Address user as **{first_name}**
-2. Use **only** the embedded tender database
-3. **Never** invent data
-4. Format cleanly: **Title**, • Bullet, [Link](url)
-5. If no match: "No matching tenders found"
-6. Document links: **Only** from `link` field
+1. Use only the embedded tender database
+2. Never invent data
+3. Document links: ONLY from `link` field
+4. If no match: Be helpful and suggest keywords
 
 USER:
 - Name: {first_name}
@@ -458,11 +458,10 @@ USER:
 DATABASE:
 {table_ctx}
 
-RESPONSE STYLE:
-- Professional
-- Structured
-- No fluff
-- Use exact DB values
+RESPONSE FORMAT:
+- Start with friendly intro
+- List tenders cleanly
+- End with helpful tip if needed
 """
         if not self.chat_context:
             self.chat_context = [{"role": "system", "content": system_prompt}]
@@ -527,10 +526,13 @@ def cleanup_old_sessions():
 def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
     tenders = get_embedded_table()
     prefs = session.get_user_preferences()
+    first_name = session.get_first_name()
     search_results = advanced_search(user_prompt, tenders, prefs) if tenders else []
 
     if search_results:
-        personalized_context = "**Recommended Tenders**\n\n"
+        count = len(search_results)
+        intro = f"Hi {first_name}! I found **{count} tender{'s' if count != 1 else ''}** matching your request:\n\n"
+        personalized_context = intro + "**Recommended Tenders**\n\n"
         for i, rec in enumerate(search_results, 1):
             tender_formatted = format_tender_with_links(rec["tender"])
             reasons = rec["reasons"]
@@ -540,19 +542,18 @@ def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
         personalized_context = personalized_context.strip()
     else:
         personalized_context = (
-            "**No matching tenders found.**\n\n"
-            "Try using keywords from:\n"
-            "• Tender title\n"
+            f"No matching tenders found, {first_name}.\n\n"
+            "Try searching with:\n"
+            "• Agency name (e.g., *eTenders*, *City of Cape Town*)\n"
             "• Reference number\n"
-            "• Agency name\n"
-            "• Category (e.g., IT Services, Construction)\n\n"
-            "Example: _'eTenders construction'_"
+            "• Category: *IT Services*, *Construction*, *Supplies*\n\n"
+            "Example: _'construction Johannesburg'_"
         )
 
     database_context = format_embedded_table_for_ai(tenders, prefs) if tenders else "No data"
 
     return f"""
-User: {session.get_first_name()}
+User: {first_name}
 Message: {user_prompt}
 
 DATABASE:
@@ -562,9 +563,11 @@ RECOMMENDATIONS:
 {personalized_context}
 
 INSTRUCTIONS:
-- Use only data above
-- Format professionally
-- Never invent
+- Be warm and personal
+- Use first name
+- Use emojis only in intro/tips
+- NEVER use emojis in tender details
+- Keep tender sections clean
 """
 
 # --- Endpoints ---
