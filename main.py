@@ -88,6 +88,7 @@ app.add_middleware(
 user_sessions = {}
 embedded_tender_table = None
 last_table_update = None
+available_agencies = set()  # NEW: Track available agencies dynamically
 
 class ChatRequest(BaseModel):
     prompt: str
@@ -349,6 +350,24 @@ def format_tender_with_links(tender):
     
     return formatted
 
+# NEW FUNCTION: Extract available agencies from tenders
+def extract_available_agencies(tenders):
+    """Extract all unique source agencies from tenders"""
+    global available_agencies
+    agencies = set()
+    
+    for tender in tenders:
+        agency = tender.get('sourceAgency')
+        if agency and agency.strip():
+            agencies.add(agency.strip())
+    
+    available_agencies = agencies
+    print(f"🔄 Updated available agencies: {len(agencies)} agencies found")
+    if agencies:
+        print(f"📋 Agencies: {', '.join(sorted(list(agencies))[:200]}...")  # Show first 200 chars
+    
+    return agencies
+
 def embed_tender_table():
     """Embed the entire ProcessedTender table into memory for AI context"""
     global embedded_tender_table, last_table_update
@@ -385,6 +404,9 @@ def embed_tender_table():
         
         embedded_tender_table = all_tenders
         last_table_update = datetime.now()
+        
+        # NEW: Extract available agencies from the loaded tenders
+        extract_available_agencies(all_tenders)
         
         print(f"✅ Embedded {len(all_tenders)} tenders from ProcessedTender table into AI context")
         
@@ -464,6 +486,17 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
     table_summary += f"• Statuses: {len(statuses)}\n"
     table_summary += f"• Tenders with Document Links: {tenders_with_links} ({tenders_with_links/total_tenders*100:.1f}%)\n\n"
     
+    # NEW: Add available agencies section
+    if available_agencies:
+        table_summary += "🏢 AVAILABLE TENDER SOURCE AGENCIES:\n"
+        agencies_list = sorted(list(available_agencies))
+        # Show all agencies but truncate if too many
+        for i, agency in enumerate(agencies_list[:20]):  # Show first 20 agencies
+            table_summary += f"• {agency}\n"
+        if len(agencies_list) > 20:
+            table_summary += f"• ... and {len(agencies_list) - 20} more agencies\n"
+        table_summary += "\n"
+    
     # Add user preferences context if available
     if user_preferences:
         preferred_categories = user_preferences.get('preferredCategories', [])
@@ -508,6 +541,9 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
     
     table_summary += "💡 You have access to all tender data including titles, references, categories, agencies, closing dates, contacts, and document links."
     table_summary += "\n\n📝 CRITICAL INSTRUCTION FOR DOCUMENT LINKS: When users ask for document links or tender documents, ALWAYS provide the actual clickable URLs from the 'link' field in Markdown format like [Download Document PDF](https://example.com/document.pdf). The 'link' field contains the actual document PDF/attachment, while 'sourceUrl' is just the tender information page. Always prioritize the 'link' field for document downloads."
+    
+    # NEW: Add agency awareness instruction
+    table_summary += "\n\n🏢 AGENCY AWARENESS: You can find tenders from ANY agency in the database. When users ask for tenders from specific agencies, check the available agencies list above and provide relevant tenders regardless of which agency they're from. The system automatically detects all available agencies from the database."
     
     return table_summary
 
@@ -612,6 +648,7 @@ CRITICAL RULES - FOLLOW THESE EXACTLY:
 7. Be warm, professional, and helpful
 8. **CRITICAL FOR DOCUMENT LINKS**: When providing document links, ALWAYS include actual clickable URLs in Markdown format like [Download Document PDF](https://example.com/document.pdf). The 'link' field contains the actual document, while 'sourceUrl' is just the information page.
 9. **SCOPE LIMITATION**: If a question is completely outside the scope of tenders, business opportunities, or general assistance, respond with: "I'm sorry, but I'm specifically designed to assist with tender-related questions and business opportunities through TenderConnect. I can help you find tender information, document links, categories, and recommendations."
+10. **AGENCY AWARENESS**: You can find tenders from ANY agency in the database. When users mention specific agencies, use the available agencies list to provide relevant tenders. The system automatically detects all agencies from the database.
 
 USER PROFILE:
 - First Name: {first_name}
@@ -629,7 +666,8 @@ RESPONSE GUIDELINES:
 - Use emojis sparingly to enhance readability
 - Never mention your capabilities or database access
 - **FOR DOCUMENT LINKS**: Always provide clickable URLs from the 'link' field, not just descriptions
-- **FOR OUT-OF-SCOPE QUESTIONS**: Politely redirect to your purpose as a tender assistant"""
+- **FOR OUT-OF-SCOPE QUESTIONS**: Politely redirect to your purpose as a tender assistant
+- **FOR AGENCY REQUESTS**: You can handle requests for tenders from ANY agency that exists in the database"""
 
         # Set the chat context with system message only if empty
         if not self.chat_context:
@@ -845,6 +883,7 @@ INSTRUCTIONS:
 - Focus on being helpful and conversational
 - FOR DOCUMENT LINKS: Always provide actual clickable URLs from the 'link' field in Markdown format
 - FOR OUT-OF-SCOPE QUESTIONS: If the question is completely unrelated to tenders or business, politely explain your purpose as a tender assistant
+- FOR AGENCY REQUESTS: You can handle tenders from ANY agency in the database - use the available agencies list
 """
     return enhanced_prompt
 
@@ -860,6 +899,7 @@ async def root():
         "status": "healthy" if ollama_available else "degraded",
         "embedded_tenders": tender_count,
         "active_sessions": len(user_sessions),
+        "available_agencies": len(available_agencies),  # NEW: Show available agencies count
         "timestamp": datetime.now().isoformat()
     }
 
@@ -876,7 +916,21 @@ async def health_check():
         "service": "B-Max AI Assistant",
         "embedded_tenders": tender_count,
         "active_sessions": len(user_sessions),
+        "available_agencies": len(available_agencies),  # NEW: Show available agencies count
         "ollama_available": ollama_available,
+        "timestamp": datetime.now().isoformat()
+    }
+
+# NEW ENDPOINT: Get available agencies
+@app.get("/agencies")
+async def get_agencies():
+    """Get all available tender source agencies from the database"""
+    tenders = get_embedded_table()
+    agencies_list = sorted(list(available_agencies))
+    
+    return {
+        "agencies": agencies_list,
+        "count": len(agencies_list),
         "timestamp": datetime.now().isoformat()
     }
 
@@ -979,6 +1033,7 @@ if __name__ == "__main__":
     print("🚀 Starting B-Max AI Assistant...")
     print("💬 Endpoint: POST /chat")
     print("🔧 Health: GET /health")
+    print("🏢 Agencies: GET /agencies")  # NEW: Added agencies endpoint
     print("🐛 Session Debug: GET /session-info/{user_id}")
     print("📊 Database:", "Connected" if dynamodb else "Disconnected")
     print("🤖 Ollama:", "Connected" if ollama_available else "Disconnected")
