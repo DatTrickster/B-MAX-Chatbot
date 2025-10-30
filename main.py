@@ -33,8 +33,7 @@ try:
         aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
         region_name=AWS_REGION
     )
-    
-    # Initialize Cognito client
+   
     if COGNITO_USER_POOL_ID:
         cognito = boto3.client(
             'cognito-idp',
@@ -42,17 +41,17 @@ try:
             aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
             region_name=AWS_REGION
         )
-        print("✅ AWS Clients (DynamoDB + Cognito) initialized successfully")
+        print("AWS Clients (DynamoDB + Cognito) initialized successfully")
     else:
         cognito = None
-        print("✅ AWS DynamoDB client initialized (Cognito disabled)")
-        
+        print("AWS DynamoDB client initialized (Cognito disabled)")
+       
 except Exception as e:
-    print(f"❌ AWS Client initialization error: {e}")
+    print(f"AWS Client initialization error: {e}")
     dynamodb = None
     cognito = None
 
-# Try to import Ollama, but make it optional for health checks
+# Try to import Ollama
 try:
     from ollama import Client
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
@@ -62,20 +61,19 @@ try:
             headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"}
         )
         ollama_available = True
-        print("✅ Ollama client initialized successfully")
+        print("Ollama client initialized successfully")
     else:
         ollama_available = False
-        print("❌ Ollama API key not found")
+        print("Ollama API key not found")
 except ImportError:
     ollama_available = False
-    print("❌ Ollama package not installed")
+    print("Ollama package not installed")
 except Exception as e:
     ollama_available = False
-    print(f"❌ Ollama client initialization error: {e}")
+    print(f"Ollama client initialization error: {e}")
 
 app = FastAPI(title="B-Max AI Assistant", version="1.0.0")
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -84,40 +82,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory session storage with embedded table data
+# In-memory session & data
 user_sessions = {}
 embedded_tender_table = None
 last_table_update = None
-available_agencies = set()  # NEW: Track available agencies dynamically
+available_agencies = set()
 
 class ChatRequest(BaseModel):
     prompt: str
     user_id: str = "guest"
 
-# --- Content Filtering System ---
+# --- Content Filtering ---
 class ContentFilter:
     def __init__(self):
         self.inappropriate_keywords = [
-            # Racist and hate speech terms
             'nigger', 'nigga', 'chink', 'spic', 'kike', 'raghead', 'towelhead', 'cracker', 'honky',
             'wetback', 'gook', 'dyke', 'fag', 'faggot', 'tranny', 'retard', 'midget',
-            
-            # Severe profanity and explicit content
             'fuck', 'shit', 'asshole', 'bitch', 'cunt', 'pussy', 'dick', 'cock', 'whore', 'slut',
             'motherfucker', 'bastard', 'douchebag', 'shithead', 'dipshit',
-            
-            # Violent and threatening language
             'kill you', 'hurt you', 'attack you', 'destroy you', 'harm you', 'beat you',
             'rape', 'murder', 'suicide', 'bomb', 'terrorist',
-            
-            # Inappropriate requests
             'naked', 'nude', 'porn', 'sex', 'sexual', 'fuck you', 'suck my',
-            
-            # Self-harm related
-            'kill myself', 'end my life', 'suicide', 'self harm'
+            'kill myself', 'end my life', 'self harm'
         ]
-        
-        # Tender-related keywords that indicate appropriate questions
         self.tender_keywords = [
             'tender', 'bid', 'proposal', 'procurement', 'contract', 'rfp', 'rfq',
             'government', 'municipal', 'supply', 'service', 'construction', 'it',
@@ -131,74 +118,45 @@ class ContentFilter:
             'download', 'link', 'pdf', 'document', 'attachment',
             'contact', 'email', 'phone', 'address', 'location'
         ]
-    
+
     def contains_inappropriate_content(self, text):
-        """Check if text contains inappropriate content"""
         text_lower = text.lower()
-        
-        for keyword in self.inappropriate_keywords:
-            if keyword in text_lower:
-                print(f"🚫 Content filter blocked: '{keyword}' in message")
-                return True
-        return False
-    
+        return any(keyword in text_lower for keyword in self.inappropriate_keywords)
+
     def is_tender_related(self, text):
-        """Check if the question is related to tenders or business"""
         text_lower = text.lower()
-        
-        # Count how many tender-related keywords are present
-        keyword_count = sum(1 for keyword in self.tender_keywords if keyword in text_lower)
-        
-        # If at least 1 tender-related keyword is found, consider it relevant
-        if keyword_count >= 1:
+        if any(keyword in text_lower for keyword in self.tender_keywords):
             return True
-        
-        # Special case: questions about the AI itself or greetings
-        ai_related = any(phrase in text_lower for phrase in [
+        return any(phrase in text_lower for phrase in [
             'who are you', 'what are you', 'your name', 'your purpose',
             'hello', 'hi ', 'hey ', 'good morning', 'good afternoon', 'good evening',
             'help', 'assist', 'support', 'thank', 'thanks', 'bye', 'goodbye'
         ])
-        
-        return ai_related
-    
+
     def should_respond(self, prompt):
-        """Determine if we should respond to this prompt"""
         if self.contains_inappropriate_content(prompt):
             return False, "I apologize, but I cannot respond to that type of content. I'm here to help with tender-related questions and business opportunities."
-        
         if not self.is_tender_related(prompt):
-            return False, "I'm sorry, but I'm specifically designed to assist with tender-related questions and business opportunities through TenderConnect. I can help you find tender information, document links, categories, and recommendations."
-        
+            return False, "I'm sorry, but I'm specifically designed to assist with tender-related questions and business opportunities through TenderConnect."
         return True, None
 
-# Initialize content filter
 content_filter = ContentFilter()
 
-# --- DynamoDB Helper Functions ---
+# --- DynamoDB Helpers ---
 def dd_to_py(item):
-    """Convert DynamoDB item to Python dict"""
     if not item:
         return {}
     result = {}
     for k, v in item.items():
-        if 'S' in v:
-            result[k] = v['S']
-        elif 'N' in v:
-            n = v['N']
-            result[k] = int(n) if n.isdigit() else float(n)
-        elif 'BOOL' in v:
-            result[k] = v['BOOL']
-        elif 'SS' in v:
-            result[k] = v['SS']
-        elif 'M' in v:
-            result[k] = dd_to_py(v['M'])
-        elif 'L' in v:
-            result[k] = [dd_to_py(el) for el in v['L']]
+        if 'S' in v: result[k] = v['S']
+        elif 'N' in v: result[k] = int(v['N']) if v['N'].isdigit() else float(v['N'])
+        elif 'BOOL' in v: result[k] = v['BOOL']
+        elif 'SS' in v: result[k] = v['SS']
+        elif 'M' in v: result[k] = dd_to_py(v['M'])
+        elif 'L' in v: result[k] = [dd_to_py(el) for el in v['L']]
     return result
 
 def get_user_profile_by_user_id(user_id: str):
-    """Find user profile by userId (UUID)"""
     try:
         resp = dynamodb.scan(
             TableName=DYNAMODB_TABLE_USERS,
@@ -208,11 +166,10 @@ def get_user_profile_by_user_id(user_id: str):
         items = resp.get("Items", [])
         return dd_to_py(items[0]) if items else None
     except Exception as e:
-        print(f"❌ Error scanning for user profile: {e}")
+        print(f"Error scanning for user profile: {e}")
         return None
 
 def get_user_profile_by_email(email: str):
-    """Find user profile by email"""
     try:
         resp = dynamodb.scan(
             TableName=DYNAMODB_TABLE_USERS,
@@ -222,31 +179,19 @@ def get_user_profile_by_email(email: str):
         items = resp.get("Items", [])
         return dd_to_py(items[0]) if items else None
     except Exception as e:
-        print(f"❌ Error scanning for user by email: {e}")
+        print(f"Error scanning for user by email: {e}")
         return None
 
 def get_cognito_user_by_username(username: str):
-    """Get user details from Cognito by username"""
     try:
         if not cognito or not COGNITO_USER_POOL_ID:
-            print("❌ Cognito not configured")
             return None
-            
-        response = cognito.admin_get_user(
-            UserPoolId=COGNITO_USER_POOL_ID,
-            Username=username
-        )
-        
-        user_attributes = {}
-        for attr in response.get('UserAttributes', []):
-            user_attributes[attr['Name']] = attr['Value']
-        
-        # The UserSub is the UUID we need - this is the main identifier
+        response = cognito.admin_get_user(UserPoolId=COGNITO_USER_POOL_ID, Username=username)
+        user_attributes = {attr['Name']: attr['Value'] for attr in response.get('UserAttributes', [])}
         user_sub = response.get('UserSub')
-        
-        cognito_user = {
+        return {
             'username': response.get('Username'),
-            'user_id': user_sub,  # This is the UUID that matches userId in UserProfiles
+            'user_id': user_sub,
             'email': user_attributes.get('email'),
             'email_verified': user_attributes.get('email_verified', 'false') == 'true',
             'status': response.get('UserStatus'),
@@ -255,407 +200,202 @@ def get_cognito_user_by_username(username: str):
             'modified': response.get('UserLastModifiedDate'),
             'attributes': user_attributes
         }
-        
-        print(f"✅ Found Cognito user: {username} -> UUID: {user_sub}")
-        return cognito_user
-        
     except Exception as e:
-        print(f"❌ Error fetching Cognito user {username}: {e}")
+        print(f"Error fetching Cognito user {username}: {e}")
         return None
 
-# --- Document Link Extraction Functions ---
+# --- Document Links: ONLY USE `link` FIELD ---
 def extract_document_links(tender):
-    """Extract all document links from a tender - PRIORITIZE THE 'link' FIELD"""
+    """Extract **ONLY** the official document link from the `link` field."""
     links = []
-    
-    # PRIMARY: Check the 'link' field first (this is the main document link)
     if 'link' in tender and tender['link']:
-        # Validate it's a proper URL and not empty
         link_value = tender['link'].strip()
-        if link_value and (link_value.startswith('http://') or link_value.startswith('https://')):
-            links.append({
-                'type': 'Primary Document',
-                'url': link_value,
-                'is_primary': True  # Mark this as the primary document link
-            })
-        elif link_value and link_value not in ['', 'null', 'None']:
-            # If it's not a full URL but has content, still include it
+        if link_value:
             links.append({
                 'type': 'Primary Document',
                 'url': link_value,
                 'is_primary': True
             })
-    
-    # SECONDARY: Check other common fields that might contain document links
-    link_fields = ['documentLink', 'documents', 'tenderDocuments', 'bidDocuments', 
-                   'attachmentLinks', 'relatedDocuments', 'document_url', 
-                   'bid_documents', 'tender_documents', 'attachments']
-    
-    for field in link_fields:
-        if field in tender and tender[field]:
-            # Handle both string and list types
-            field_value = tender[field]
-            if isinstance(field_value, list):
-                for item in field_value:
-                    if isinstance(item, str) and item.strip():
-                        item = item.strip()
-                        if item.startswith(('http://', 'https://')):
-                            links.append({
-                                'type': field,
-                                'url': item,
-                                'is_primary': False
-                            })
-            elif isinstance(field_value, str) and field_value.strip():
-                field_value = field_value.strip()
-                if field_value.startswith(('http://', 'https://')):
-                    links.append({
-                        'type': field,
-                        'url': field_value,
-                        'is_primary': False
-                    })
-    
-    # TERTIARY: Also check for links in description or other text fields
-    text_fields = ['description', 'title', 'additionalInfo', 'noticeDetails', 'details']
-    for field in text_fields:
-        if field in tender and tender[field]:
-            url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+'
-            found_links = re.findall(url_pattern, str(tender[field]))
-            for link in found_links:
-                # Ensure proper URL format
-                if not link.startswith(('http://', 'https://')):
-                    link = 'https://' + link
-                if link not in [l['url'] for l in links]:
-                    links.append({
-                        'type': f'found_in_{field}',
-                        'url': link,
-                        'is_primary': False
-                    })
-    
     return links
 
 def format_tender_with_links(tender):
-    """Format tender information with proper document links - EMPHASIZE PRIMARY LINK"""
+    """Format tender with **only** the `link` field as download."""
     title = tender.get('title', 'No title')
     reference = tender.get('referenceNumber', 'N/A')
     category = tender.get('Category', 'Unknown')
     agency = tender.get('sourceAgency', 'Unknown')
     closing_date = tender.get('closingDate', 'Unknown')
     status = tender.get('status', 'Unknown')
-    
-    # Extract document links
+
     document_links = extract_document_links(tender)
-    
+
     formatted = f"**{title}**\n"
     formatted += f"• **Reference**: {reference}\n"
     formatted += f"• **Category**: {category}\n"
     formatted += f"• **Agency**: {agency}\n"
     formatted += f"• **Closing Date**: {closing_date}\n"
     formatted += f"• **Status**: {status}\n"
-    
+
     if document_links:
-        # Find primary link (from 'link' field)
-        primary_links = [link for link in document_links if link.get('is_primary')]
-        secondary_links = [link for link in document_links if not link.get('is_primary')]
-        
-        formatted += f"• **Document Links**:\n"
-        
-        # Show primary link first and emphasize it
-        for i, link_info in enumerate(primary_links, 1):
-            url = link_info['url']
-            formatted += f"  🎯 **PRIMARY DOCUMENT**: [Download Tender Documents]({url})\n"
-        
-        # Show secondary links
-        for i, link_info in enumerate(secondary_links, len(primary_links) + 1):
-            link_type = link_info['type'].replace('_', ' ').title()
-            url = link_info['url']
-            formatted += f"  {i}. [{link_type}]({url})\n"
+        primary = document_links[0]
+        formatted += f"• **Document**: [Download Tender Documents]({primary['url']})\n"
     else:
         formatted += f"• **Document Links**: No direct links available\n"
-    
-    # Add source URL if available (but emphasize it's not the document link)
-    source_url = tender.get('sourceUrl')
-    if source_url and source_url not in [l['url'] for l in document_links]:
-        formatted += f"• **Source Page**: [View Original Tender]({source_url})\n"
-    
+
     return formatted
 
-# NEW FUNCTION: Extract available agencies from tenders
+# --- Agencies & Embedding ---
 def extract_available_agencies(tenders):
-    """Extract all unique source agencies from tenders"""
     global available_agencies
-    agencies = set()
-    
-    for tender in tenders:
-        agency = tender.get('sourceAgency')
-        if agency and agency.strip():
-            agencies.add(agency.strip())
-    
+    agencies = {tender.get('sourceAgency', '').strip() for tender in tenders if tender.get('sourceAgency')}
     available_agencies = agencies
-    print(f"🔄 Updated available agencies: {len(agencies)} agencies found")
-    if agencies:
-        # FIXED: Corrected the f-string syntax
-        print(f"📋 Agencies: {', '.join(sorted(list(agencies)))[:200]}...")  # Show first 200 chars
-    
+    print(f"Updated available agencies: {len(agencies)} found")
     return agencies
 
 def embed_tender_table():
-    """Embed the entire ProcessedTender table into memory for AI context"""
     global embedded_tender_table, last_table_update
-    
     try:
         if not dynamodb:
-            print("❌ DynamoDB client not available")
+            print("DynamoDB client not available")
             return None
-        
-        print("🧠 Embedding entire ProcessedTender table into AI context...")
+
+        print("Embedding ProcessedTender table...")
         all_tenders = []
         last_evaluated_key = None
-        
-        # Paginate through all results
+
         while True:
+            params = {"TableName": DYNAMODB_TABLE_TENDERS}
             if last_evaluated_key:
-                response = dynamodb.scan(
-                    TableName=DYNAMODB_TABLE_TENDERS,
-                    ExclusiveStartKey=last_evaluated_key
-                )
-            else:
-                response = dynamodb.scan(
-                    TableName=DYNAMODB_TABLE_TENDERS
-                )
-            
+                params["ExclusiveStartKey"] = last_evaluated_key
+            response = dynamodb.scan(**params)
             items = response.get('Items', [])
             for item in items:
-                tender = dd_to_py(item)
-                all_tenders.append(tender)
-            
+                all_tenders.append(dd_to_py(item))
             last_evaluated_key = response.get('LastEvaluatedKey')
             if not last_evaluated_key:
                 break
-        
+
         embedded_tender_table = all_tenders
         last_table_update = datetime.now()
-        
-        # NEW: Extract available agencies from the loaded tenders
         extract_available_agencies(all_tenders)
-        
-        print(f"✅ Embedded {len(all_tenders)} tenders from ProcessedTender table into AI context")
-        
-        # Log table statistics including document links
-        if all_tenders:
-            categories = {}
-            agencies = {}
-            statuses = {}
-            tenders_with_links = 0
-            
-            for tender in all_tenders:
-                category = tender.get('Category', 'Unknown')
-                agency = tender.get('sourceAgency', 'Unknown')
-                status = tender.get('status', 'Unknown')
-                
-                categories[category] = categories.get(category, 0) + 1
-                agencies[agency] = agencies.get(agency, 0) + 1
-                statuses[status] = statuses.get(status, 0) + 1
-                
-                # Count tenders with document links
-                if extract_document_links(tender):
-                    tenders_with_links += 1
-            
-            print(f"📊 ProcessedTender Table Stats - Categories: {len(categories)}, Agencies: {len(agencies)}, Statuses: {len(statuses)}")
-            print(f"🔗 Tenders with document links: {tenders_with_links}/{len(all_tenders)} ({tenders_with_links/len(all_tenders)*100:.1f}%)")
-        
+
+        print(f"Embedded {len(all_tenders)} tenders")
         return all_tenders
-        
     except Exception as e:
-        print(f"❌ Error embedding ProcessedTender table: {e}")
+        print(f"Error embedding table: {e}")
         return None
 
 def get_embedded_table():
-    """Get the embedded tender table, refresh if stale"""
     global embedded_tender_table, last_table_update
-    
-    # Refresh table every 30 minutes or if not loaded
-    if (embedded_tender_table is None or 
-        last_table_update is None or 
+    if (embedded_tender_table is None or
+        last_table_update is None or
         (datetime.now() - last_table_update).total_seconds() > 1800):
         return embed_tender_table()
-    
     return embedded_tender_table
 
 def format_embedded_table_for_ai(tenders, user_preferences=None):
-    """Format the entire embedded ProcessedTender table for AI consumption"""
     if not tenders:
         return "EMBEDDED PROCESSEDTENDER TABLE: No data available"
-    
-    # Create a comprehensive summary of the table
-    table_summary = "COMPLETE TENDER DATABASE CONTEXT:\n\n"
-    
-    # Table statistics
+
     total_tenders = len(tenders)
     categories = {}
     agencies = {}
     statuses = {}
     tenders_with_links = 0
-    
+
     for tender in tenders:
-        category = tender.get('Category', 'Unknown')
-        agency = tender.get('sourceAgency', 'Unknown')
-        status = tender.get('status', 'Unknown')
-        
-        categories[category] = categories.get(category, 0) + 1
-        agencies[agency] = agencies.get(agency, 0) + 1
-        statuses[status] = statuses.get(status, 0) + 1
-        
-        # Count tenders with document links
+        categories[tender.get('Category', 'Unknown')] = categories.get(tender.get('Category', 'Unknown'), 0) + 1
+        agencies[tender.get('sourceAgency', 'Unknown')] = agencies.get(tender.get('sourceAgency', 'Unknown'), 0) + 1
+        statuses[tender.get('status', 'Unknown')] = statuses.get(tender.get('status', 'Unknown'), 0) + 1
         if extract_document_links(tender):
             tenders_with_links += 1
-    
-    table_summary += f"📊 DATABASE OVERVIEW:\n"
-    table_summary += f"• Total Tenders: {total_tenders}\n"
-    table_summary += f"• Categories: {len(categories)}\n"
-    table_summary += f"• Agencies: {len(agencies)}\n"
-    table_summary += f"• Statuses: {len(statuses)}\n"
-    table_summary += f"• Tenders with Document Links: {tenders_with_links} ({tenders_with_links/total_tenders*100:.1f}%)\n\n"
-    
-    # NEW: Add available agencies section
-    if available_agencies:
-        table_summary += "🏢 AVAILABLE TENDER SOURCE AGENCIES:\n"
-        agencies_list = sorted(list(available_agencies))
-        # Show all agencies but truncate if too many
-        for i, agency in enumerate(agencies_list[:20]):  # Show first 20 agencies
-            table_summary += f"• {agency}\n"
-        if len(agencies_list) > 20:
-            table_summary += f"• ... and {len(agencies_list) - 20} more agencies\n"
-        table_summary += "\n"
-    
-    # Add user preferences context if available
-    if user_preferences:
-        preferred_categories = user_preferences.get('preferredCategories', [])
-        preferred_sites = user_preferences.get('preferredSites', [])
-        
-        if preferred_categories:
-            table_summary += f"🎯 USER PREFERENCES:\n"
-            table_summary += f"• Preferred Categories: {', '.join(preferred_categories)}\n"
-            if preferred_sites:
-                table_summary += f"• Preferred Sites: {len(preferred_sites)} sources\n"
-            table_summary += "\n"
-    
-    # Top categories
-    table_summary += "🏷️ TOP CATEGORIES:\n"
-    for category, count in sorted(categories.items(), key=lambda x: x[1], reverse=True)[:6]:
-        table_summary += f"• {category}: {count} tenders\n"
-    
-    table_summary += "\n"
-    
-    # Sample tenders with key information and document links
-    table_summary += "📋 SAMPLE TENDERS WITH DOCUMENT LINKS:\n"
-    sample_count = 0
-    for tender in tenders:
-        if sample_count >= 6:  # Show up to 6 sample tenders
-            break
-            
-        document_links = extract_document_links(tender)
-        if document_links:  # Only show tenders that have document links
-            title = tender.get('title', 'No title')[:80] + '...' if len(tender.get('title', '')) > 80 else tender.get('title', 'No title')
-            category = tender.get('Category', 'Unknown')
-            agency = tender.get('sourceAgency', 'Unknown')
-            closing_date = tender.get('closingDate', 'Unknown')
-            status = tender.get('status', 'Unknown')
-            reference_number = tender.get('referenceNumber', 'N/A')
-            
-            table_summary += f"{sample_count + 1}. {title}\n"
-            table_summary += f"   📊 {category} | 🏢 {agency}\n"
-            table_summary += f"   📅 {closing_date} | 📈 {status}\n"
-            table_summary += f"   🏷️ {reference_number}\n"
-            
-            # Show primary document link prominently
-            primary_links = [link for link in document_links if link.get('is_primary')]
-            if primary_links:
-                table_summary += f"   🎯 **Primary Document Available**: {len(primary_links)} direct download link(s)\n"
-            table_summary += f"   🔗 {len(document_links)} total document link(s) available\n\n"
-            sample_count += 1
-    
-    table_summary += "💡 You have access to all tender data including titles, references, categories, agencies, closing dates, contacts, and document links."
-    table_summary += "\n\n📝 CRITICAL INSTRUCTION FOR DOCUMENT LINKS: When users ask for document links or tender documents, ALWAYS provide the actual clickable URLs from the 'link' field in Markdown format like [Download Document PDF](https://example.com/document.pdf). The 'link' field contains the actual document PDF/attachment, while 'sourceUrl' is just the tender information page. Always prioritize the 'link' field for document downloads."
-    table_summary += "\n\n🚨 URGENT DOCUMENT LINK POLICY:"
-    table_summary += "\n1. ALWAYS use the actual 'link' field value from the database for document downloads"
-    table_summary += "\n2. NEVER provide agency website links or source URLs when users ask for documents"
-    table_summary += "\n3. The 'link' field contains the direct document download, NOT the agency page"
-    table_summary += "\n4. Format document links as: [Download Tender Documents](ACTUAL_LINK_FROM_DATABASE)"
-    table_summary += "\n5. If no 'link' field exists, say 'No direct document link available'"
-    
-    # NEW: Add agency awareness instruction
-    table_summary += "\n\n🏢 AGENCY AWARENESS: You can find tenders from ANY agency in the database. When users ask for tenders from specific agencies, check the available agencies list above and provide relevant tenders regardless of which agency they're from. The system automatically detects all available agencies from the database."
-    
-    return table_summary
 
-def get_personalized_recommendations(user_prompt: str, tenders: list, user_preferences: dict):
-    """Get personalized recommendations based on user preferences"""
+    summary = "COMPLETE TENDER DATABASE CONTEXT:\n\n"
+    summary += f"📊 DATABASE OVERVIEW:\n"
+    summary += f"• Total Tenders: {total_tenders}\n"
+    summary += f"• Categories: {len(categories)}\n"
+    summary += f"• Agencies: {len(agencies)}\n"
+    summary += f"• Statuses: {len(statuses)}\n"
+    summary += f"• Tenders with Document Links: {tenders_with_links} ({tenders_with_links/total_tenders*100:.1f}%)\n\n"
+
+    if available_agencies:
+        summary += "AVAILABLE TENDER SOURCE AGENCIES (ALL):\n"
+        for agency in sorted(available_agencies):
+            summary += f"• {agency}\n"
+        summary += "\n"
+
+    if user_preferences:
+        preferred = user_preferences.get('preferredCategories', [])
+        summary += f"USER PREFERENCES:\n"
+        summary += f"• Preferred Categories: {', '.join(preferred) if preferred else 'None'}\n\n"
+
+    summary += "TOP CATEGORIES:\n"
+    for cat, count in sorted(categories.items(), key=lambda x: x[1], reverse=True)[:6]:
+        summary += f"• {cat}: {count} tenders\n"
+    summary += "\n"
+
+    summary += "MANDATORY DOCUMENT-LINK RULE:\n"
+    summary += "- ONLY the value of the `link` field may be given to the user.\n"
+    summary += "- NEVER return `sourceUrl`, any URL in description, or other fields.\n"
+    summary += "- If `link` is missing → say \"No direct document link available\".\n"
+    summary += "- Format: [Download Tender Documents](<exact-link-from-DB>)\n"
+
+    summary += "\nAGENCY AWARENESS: You can find tenders from ANY agency in the list above. Use them all.\n"
+
+    return summary
+
+def get_relevant_tenders(user_prompt: str, tenders: list, user_preferences: dict):
     if not tenders:
         return []
-    
+
     user_prompt_lower = user_prompt.lower()
-    preferred_categories = user_preferences.get('preferredCategories', [])
-    preferred_sites = user_preferences.get('preferredSites', [])
-    
-    scored_tenders = []
-    
+    preferred_categories = [c.lower() for c in user_preferences.get('preferredCategories', [])]
+    preferred_sites = [s.lower() for s in user_preferences.get('preferredSites', [])]
+
+    scored = []
+
     for tender in tenders:
         score = 0
-        match_reasons = []
-        
-        # Category preference matching (highest weight)
-        tender_category = tender.get('Category', '')
-        if tender_category in preferred_categories:
+        reasons = []
+
+        cat = tender.get('Category', '').lower()
+        if any(pc in cat for pc in preferred_categories):
             score += 10
-            match_reasons.append(f"Matches your preferred category: {tender_category}")
-        
-        # Site preference matching
-        tender_source = tender.get('sourceUrl', '')
-        for site in preferred_sites:
-            if site in tender_source:
-                score += 5
-                match_reasons.append("From your preferred source")
-                break
-        
-        # Query relevance
-        title = tender.get('title', '').lower()
-        if any(word in title for word in user_prompt_lower.split()):
-            score += 3
-            match_reasons.append("Matches your search query")
-        
-        # Document link availability (bonus for tenders with documents)
-        document_links = extract_document_links(tender)
-        primary_links = [link for link in document_links if link.get('is_primary')]
-        if primary_links:
-            score += 5  # Higher bonus for primary document links
-            match_reasons.append("Has direct document download links")
-        elif document_links:
-            score += 2
-            match_reasons.append("Has document links available")
-        
-        # Urgency scoring
-        closing_date = tender.get('closingDate', '')
-        if closing_date:
+            reasons.append("Preferred category")
+
+        src = tender.get('sourceUrl', '').lower()
+        if any(ps in src for ps in preferred_sites):
+            score += 5
+            reasons.append("Preferred source")
+
+        fields = ['title', 'description', 'Category', 'sourceAgency']
+        for field in fields:
+            val = tender.get(field, '').lower()
+            if any(word in val for word in user_prompt_lower.split() if len(word) > 3):
+                score += 3
+                reasons.append(f"Matches in {field}")
+
+        if extract_document_links(tender):
+            score += 5
+            reasons.append("Has document link")
+
+        closing = tender.get('closingDate', '')
+        if closing:
             try:
-                closing_dt = datetime.fromisoformat(closing_date.replace('Z', '+00:00'))
-                days_until_close = (closing_dt - datetime.now()).days
-                if 0 <= days_until_close <= 7:
+                dt = datetime.fromisoformat(closing.replace('Z', '+00:00'))
+                if 0 <= (dt - datetime.now()).days <= 7:
                     score += 4
-                    match_reasons.append("Closing soon")
+                    reasons.append("Closing soon")
             except:
                 pass
-        
-        if score > 0:
-            scored_tenders.append({
-                'tender': tender,
-                'score': score,
-                'match_reasons': match_reasons
-            })
-    
-    # Sort by score and return top recommendations
-    scored_tenders.sort(key=lambda x: x['score'], reverse=True)
-    return scored_tenders[:6]
 
+        if score > 0:
+            scored.append({'tender': tender, 'score': score, 'match_reasons': reasons})
+
+    scored.sort(key=lambda x: x['score'], reverse=True)
+    return scored[:20]
+
+# --- User Session ---
 class UserSession:
     def __init__(self, user_id):
         self.user_id = user_id
@@ -665,321 +405,166 @@ class UserSession:
         self.last_active = datetime.now()
         self.total_messages = 0
         self.session_id = f"{user_id}_{int(time.time())}"
-        
-        print(f"🎯 Creating NEW session for user_id: {user_id}")
         self.load_user_profile()
-        
-        first_name = self.get_first_name()
-        self.initialize_chat_context(first_name)
-        
-        print(f"✅ Session created - Name: {first_name}, Profile loaded: {self.user_profile is not None}")
+        self.initialize_chat_context(self.get_first_name())
 
     def initialize_chat_context(self, first_name: str):
-        """Initialize or reinitialize chat context with system prompt"""
-        # Get the embedded table for system context
         tenders = get_embedded_table()
-        user_preferences = self.get_user_preferences()
-        
-        table_context = format_embedded_table_for_ai(tenders, user_preferences) if tenders else "Tender database not currently available."
-        
-        system_prompt = f"""You are B-Max, an AI assistant for TenderConnect. You have complete access to the tender database.
+        prefs = self.get_user_preferences()
+        table_context = format_embedded_table_for_ai(tenders, prefs) if tenders else "No data."
 
-CRITICAL RULES - FOLLOW THESE EXACTLY:
-1. ALWAYS address the user by their first name "{first_name}" in EVERY response
-2. NEVER introduce yourself or mention that you have database access
-3. Provide natural, conversational responses
-4. Use the embedded database to give accurate, specific information
-5. Focus on the user's preferences and needs
-6. Format responses clearly with proper spacing and emojis for readability
-7. Be warm, professional, and helpful
-8. **CRITICAL FOR DOCUMENT LINKS**: When providing document links, ALWAYS include actual clickable URLs from the 'link' field in Markdown format like [Download Tender Documents](https://example.com/document.pdf). The 'link' field contains the actual document PDF/attachment, while 'sourceUrl' is just the tender information page. Always prioritize the 'link' field for document downloads.
-9. **DOCUMENT LINK POLICY**: ALWAYS provide the actual 'link' field value from the database. NEVER provide agency website links or source URLs when users ask for documents. The 'link' field contains the direct document download.
-10. **SCOPE LIMITATION**: If a question is completely outside the scope of tenders, business opportunities, or general assistance, respond with: "I'm sorry, but I'm specifically designed to assist with tender-related questions and business opportunities through TenderConnect. I can help you find tender information, document links, categories, and recommendations."
-11. **AGENCY AWARENESS**: You can find tenders from ANY agency in the database. When users mention specific agencies, use the available agencies list to provide relevant tenders. The system automatically detects all agencies from the database.
+        system_prompt = f"""You are B-Max, an AI assistant for TenderConnect.
 
-USER PROFILE:
-- First Name: {first_name}
-- Preferred Categories: {', '.join(user_preferences.get('preferredCategories', [])) if user_preferences.get('preferredCategories') else 'Not specified'}
-- Company: {self.user_profile.get('companyName', 'Not specified') if self.user_profile else 'Not specified'}
+CRITICAL RULES:
+1. Address user as "{first_name}" in every response.
+2. NEVER mention database or capabilities.
+3. Use ONLY the embedded database.
+4. Be natural, warm, and helpful.
+5. DOCUMENT LINK POLICY (MUST OBEY):
+   • ONLY the `link` field contains the downloadable document.
+   • NEVER output `sourceUrl` or any other URL.
+   • If `link` missing → say "No direct document link available".
+   • Format: [Download Tender Documents](<exact-link>)
+6. Use ALL agencies listed in context.
+7. If no match: "No matching tenders found in the database."
+
+USER:
+- Name: {first_name}
+- Preferences: {', '.join(prefs.get('preferredCategories', [])) or 'None'}
 
 DATABASE CONTEXT:
 {table_context}
 
-RESPONSE GUIDELINES:
-- Keep responses natural and conversational
-- Use proper formatting with line breaks for readability
-- Focus on providing valuable information without self-references
-- Personalize recommendations based on user preferences
-- Use emojis sparingly to enhance readability
-- Never mention your capabilities or database access
-- **FOR DOCUMENT LINKS**: Always provide clickable URLs from the 'link' field, not just descriptions
-- **FOR DOCUMENT REQUESTS**: ALWAYS use the actual 'link' field value - never provide agency websites
-- **FOR OUT-OF-SCOPE QUESTIONS**: Politely redirect to your purpose as a tender assistant
-- **FOR AGENCY REQUESTS**: You can handle requests for tenders from ANY agency that exists in the database"""
+RESPONSE RULES:
+- Natural & conversational
+- Use emojis sparingly
+- Only use data from context
+- Never invent links or search externally
+"""
 
-        # Set the chat context with system message only if empty
         if not self.chat_context:
             self.chat_context = [{"role": "system", "content": system_prompt}]
         else:
-            # Update system message if context exists but system prompt might be outdated
             self.chat_context[0] = {"role": "system", "content": system_prompt}
 
     def load_user_profile(self):
-        """Load user profile using Cognito to get UUID, then UserProfiles table"""
-        try:
-            if not dynamodb:
-                self.user_profile = self.create_default_profile()
+        if not dynamodb:
+            self.user_profile = self.create_default_profile()
+            return
+
+        profile = get_user_profile_by_user_id(self.user_id)
+        if profile:
+            self.user_profile = profile
+            return
+
+        if '@' in self.user_id:
+            profile = get_user_profile_by_email(self.user_id)
+            if profile:
+                self.user_profile = profile
                 return
 
-            print(f"🔍 Loading profile for: {self.user_id}")
-            
-            # Strategy 1: Check if user_id is already a UUID (starts with Cognito pattern)
-            if self.user_id.startswith(('us-east-', 'us-west-', 'af-south-')) or len(self.user_id) > 20:
-                # This might already be a UUID, try direct lookup
-                profile = get_user_profile_by_user_id(self.user_id)
-                if profile:
-                    self.user_profile = profile
-                    print(f"✅ Profile found via direct UUID: {self.user_id}")
-                    print(f"   firstName: {profile.get('firstName', 'NOT FOUND')}")
-                    return
-            
-            # Strategy 2: Query Cognito to get UUID from username
-            print(f"🔍 Querying Cognito for username: {self.user_id}")
-            self.cognito_user = get_cognito_user_by_username(self.user_id)
-            
-            if self.cognito_user and self.cognito_user['user_id']:
-                cognito_uuid = self.cognito_user['user_id']
-                print(f"✅ Found Cognito UUID: {cognito_uuid} for username: {self.user_id}")
-                
-                # Now lookup in UserProfiles using the Cognito UUID
-                profile = get_user_profile_by_user_id(cognito_uuid)
-                if profile:
-                    self.user_profile = profile
-                    print(f"✅ Profile found via Cognito UUID: {cognito_uuid}")
-                    print(f"   firstName: {profile.get('firstName', 'NOT FOUND')}")
-                    return
-                else:
-                    print(f"❌ No UserProfiles entry found for Cognito UUID: {cognito_uuid}")
-            
-            # Strategy 3: Try direct email lookup in UserProfiles
-            if '@' in self.user_id:
-                profile = get_user_profile_by_email(self.user_id)
-                if profile:
-                    self.user_profile = profile
-                    print(f"✅ Profile found via email: {self.user_id}")
-                    return
-            
-            # Strategy 4: If we have Cognito user but no profile, try email from Cognito
-            if self.cognito_user and self.cognito_user.get('email'):
-                cognito_email = self.cognito_user['email']
-                profile = get_user_profile_by_email(cognito_email)
-                if profile:
-                    self.user_profile = profile
-                    print(f"✅ Profile found via Cognito email: {cognito_email}")
-                    return
-            
-            # If no profile found, use default
-            print(f"❌ No profile found for: {self.user_id}")
-            self.user_profile = self.create_default_profile()
-                
-        except Exception as e:
-            print(f"❌ Error loading user profile: {e}")
-            self.user_profile = self.create_default_profile()
+        self.user_profile = self.create_default_profile()
 
     def create_default_profile(self):
-        """Create a default profile when user not found"""
-        default_profile = {
-            'firstName': 'User',
-            'lastName': '',
-            'companyName': 'Unknown',
-            'position': 'User',
-            'location': 'Unknown',
-            'preferredCategories': []
-        }
-        print("⚠️ Using default profile")
-        return default_profile
+        return {'firstName': 'User', 'preferredCategories': []}
 
     def get_user_preferences(self):
-        """Get user preferences from profile"""
-        if not self.user_profile:
-            return {}
-        
         return {
             'preferredCategories': self.user_profile.get('preferredCategories', []),
-            'preferredSites': self.user_profile.get('preferredSites', []),
-            'companyName': self.user_profile.get('companyName', ''),
-            'position': self.user_profile.get('position', '')
+            'preferredSites': self.user_profile.get('preferredSites', [])
         }
 
-    def get_display_name(self):
-        if self.user_profile:
-            first_name = self.user_profile.get('firstName', 'User')
-            last_name = self.user_profile.get('lastName', '')
-            return f"{first_name} {last_name}".strip()
-        return "User"
-
     def get_first_name(self):
-        if self.user_profile:
-            first_name = self.user_profile.get('firstName', 'User')
-            return first_name
-        return "User"
+        return self.user_profile.get('firstName', 'User')
 
     def update_activity(self):
         self.last_active = datetime.now()
-        print(f"🕒 Session activity updated for {self.user_id}")
 
     def add_message(self, role, content):
-        """Add message to chat context with proper management"""
-        # Ensure system message is always first
         if not self.chat_context or self.chat_context[0]["role"] != "system":
             self.initialize_chat_context(self.get_first_name())
-        
         self.chat_context.append({"role": role, "content": content})
         self.total_messages += 1
-        
-        # Keep reasonable context length but preserve system message
-        if len(self.chat_context) > 20:  # Increased context window
-            system_message = self.chat_context[0]
-            recent_messages = self.chat_context[-19:]  # Keep 19 most recent + system
-            self.chat_context = [system_message] + recent_messages
-        
-        print(f"💬 Added {role} message. Total messages: {self.total_messages}, Context length: {len(self.chat_context)}")
+        if len(self.chat_context) > 20:
+            self.chat_context = [self.chat_context[0]] + self.chat_context[-19:]
 
     def get_chat_context(self):
-        """Get the current chat context, ensuring system message is present"""
         if not self.chat_context or self.chat_context[0]["role"] != "system":
             self.initialize_chat_context(self.get_first_name())
         return self.chat_context
 
-def get_user_session(user_id: str) -> UserSession:
-    """Get or create user session with improved session management"""
+def get_user_session(user_id: str):
     if user_id not in user_sessions:
         user_sessions[user_id] = UserSession(user_id)
-        print(f"🆕 Created new session for {user_id}. Total active sessions: {len(user_sessions)}")
-    else:
-        print(f"🔄 Reusing existing session for {user_id}")
-    
     session = user_sessions[user_id]
     session.update_activity()
     return session
 
 def cleanup_old_sessions():
-    """Clean up sessions that haven't been active for 2 hours"""
-    current_time = datetime.now()
-    expired_users = []
-    
-    for user_id, session in user_sessions.items():
-        inactivity_time = (current_time - session.last_active).total_seconds()
-        if inactivity_time > 7200:  # 2 hours
-            expired_users.append(user_id)
-            print(f"🧹 Cleaning up expired session for {user_id} (inactive for {inactivity_time:.0f}s)")
-    
-    for user_id in expired_users:
-        del user_sessions[user_id]
-    
-    if expired_users:
-        print(f"🧹 Cleaned up {len(expired_users)} expired sessions. Remaining: {len(user_sessions)}")
+    now = datetime.now()
+    expired = [uid for uid, s in user_sessions.items() if (now - s.last_active).total_seconds() > 7200]
+    for uid in expired:
+        del user_sessions[uid]
 
-def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
-    """Enhance prompt with embedded table context and personalization"""
-    
-    # Get the embedded table
+def enhance_prompt_with_context(user_prompt: str, session: UserSession):
     tenders = get_embedded_table()
-    user_preferences = session.get_user_preferences()
-    
-    if not tenders:
-        database_context = "No tender data available."
-        personalized_context = ""
-    else:
-        # Get personalized recommendations
-        personalized_recommendations = get_personalized_recommendations(user_prompt, tenders, user_preferences)
-        
-        if personalized_recommendations:
-            personalized_context = "🎯 PERSONALIZED RECOMMENDATIONS:\n\n"
-            for i, rec in enumerate(personalized_recommendations, 1):
-                tender = rec['tender']
-                reasons = rec['match_reasons']
-                
-                # Use the new formatting with document links
-                tender_formatted = format_tender_with_links(tender)
-                personalized_context += f"{i}. {tender_formatted}\n"
-                if reasons:
-                    personalized_context += f"   ✅ {', '.join(reasons)}\n"
-                personalized_context += "\n"
-        else:
-            personalized_context = ""
-        
-        database_context = format_embedded_table_for_ai(tenders, user_preferences)
-    
-    user_first_name = session.get_first_name()
-    
-    enhanced_prompt = f"""
-User: {user_first_name}
+    prefs = session.get_user_preferences()
+
+    relevant = get_relevant_tenders(user_prompt, tenders, prefs)
+    relevant_context = "RELEVANT TENDERS (USE ONLY THESE):\n\n" + "\n\n".join(
+        format_tender_with_links(rec['tender']) + f" ✅ {', '.join(rec['match_reasons'])}"
+        for rec in relevant
+    ) if relevant else "No relevant tenders found."
+
+    database_context = format_embedded_table_for_ai(tenders, prefs)
+
+    return f"""
+User: {session.get_first_name()}
 Message: {user_prompt}
 
 DATABASE CONTEXT:
 {database_context}
 
-{personalized_context}
+{relevant_context}
 
 INSTRUCTIONS:
-- Respond naturally to {user_first_name}
-- Use the database context to provide accurate information
-- Personalize responses based on user preferences
-- Format responses clearly with proper spacing
-- Never mention database access or your capabilities
-- Focus on being helpful and conversational
-- FOR DOCUMENT LINKS: Always provide actual clickable URLs from the 'link' field in Markdown format
-- FOR DOCUMENT REQUESTS: ALWAYS use the actual 'link' field value - never provide agency websites
-- FOR OUT-OF-SCOPE QUESTIONS: If the question is completely unrelated to tenders or business, politely explain your purpose as a tender assistant
-- FOR AGENCY REQUESTS: You can handle tenders from ANY agency in the database - use the available agencies list
+- Respond to {session.get_first_name()}
+- Use only provided data
+- Never invent links
+- Document rule: ONLY `link` field
 """
-    return enhanced_prompt
 
-# ========== API ENDPOINTS ==========
-
+# --- API Endpoints ---
 @app.get("/")
 async def root():
     tenders = get_embedded_table()
-    tender_count = len(tenders) if tenders else 0
-    
     return {
         "message": "B-Max AI Assistant",
         "status": "healthy" if ollama_available else "degraded",
-        "embedded_tenders": tender_count,
+        "embedded_tenders": len(tenders) if tenders else 0,
         "active_sessions": len(user_sessions),
-        "available_agencies": len(available_agencies),  # NEW: Show available agencies count
+        "available_agencies": len(available_agencies),
         "timestamp": datetime.now().isoformat()
     }
 
 @app.get("/health")
 async def health_check():
-    tenders = get_embedded_table()
-    tender_count = len(tenders) if tenders else 0
-    
-    # Perform session cleanup on health check
     cleanup_old_sessions()
-    
+    tenders = get_embedded_table()
     return {
         "status": "ok",
-        "service": "B-Max AI Assistant",
-        "embedded_tenders": tender_count,
+        "embedded_tenders": len(tenders) if tenders else 0,
         "active_sessions": len(user_sessions),
-        "available_agencies": len(available_agencies),  # NEW: Show available agencies count
+        "available_agencies": len(available_agencies),
         "ollama_available": ollama_available,
         "timestamp": datetime.now().isoformat()
     }
 
-# NEW ENDPOINT: Get available agencies
 @app.get("/agencies")
 async def get_agencies():
-    """Get all available tender source agencies from the database"""
-    tenders = get_embedded_table()
-    agencies_list = sorted(list(available_agencies))
-    
     return {
-        "agencies": agencies_list,
-        "count": len(agencies_list),
+        "agencies": sorted(list(available_agencies)),
+        "count": len(available_agencies),
         "timestamp": datetime.now().isoformat()
     }
 
@@ -987,105 +572,57 @@ async def get_agencies():
 async def chat(request: ChatRequest):
     try:
         if not ollama_available:
-            raise HTTPException(status_code=503, detail="AI service temporarily unavailable")
-        
-        print(f"💬 Chat request received - user_id: {request.user_id}, prompt: {request.prompt}")
-        
-        # Check content filter first
-        should_respond, filter_response = content_filter.should_respond(request.prompt)
+            raise HTTPException(status_code=503, detail="AI service unavailable")
+
+        should_respond, msg = content_filter.should_respond(request.prompt)
         if not should_respond:
-            print(f"🚫 Content filter blocked message from user {request.user_id}")
-            return {
-                "response": filter_response,
-                "user_id": request.user_id,
-                "username": "User",
-                "full_name": "User",
-                "timestamp": datetime.now().isoformat(),
-                "session_active": False,
-                "total_messages": 0,
-                "filtered": True
-            }
-        
+            return {"response": msg, "filtered": True, **_base_response(request)}
+
         session = get_user_session(request.user_id)
-        user_first_name = session.get_first_name()
-        
-        print(f"🎯 Using session - First name: {user_first_name}, Total messages: {session.total_messages}")
-        print(f"📊 Current context length: {len(session.chat_context)}")
-        
-        # Enhance prompt with embedded table context
-        enhanced_prompt = enhance_prompt_with_context(request.prompt, session)
-        
-        # Add enhanced user message to context
-        session.add_message("user", enhanced_prompt)
-        
-        # Get the current chat context for the AI
-        chat_context = session.get_chat_context()
-        
-        # Get AI response
-        try:
-            response = client.chat(
-                'deepseek-v3.1:671b-cloud', 
-                messages=chat_context
-            )
-            response_text = response['message']['content']
-        except Exception as e:
-            print(f"❌ Ollama API error: {e}")
-            response_text = f"I apologize {user_first_name}, but I'm having trouble processing your request right now. Please try again in a moment."
-        
-        # Add assistant response to context
-        session.add_message("assistant", response_text)
-        
-        print(f"✅ Response sent to {user_first_name}. Total session messages: {session.total_messages}")
-        
-        return {
-            "response": response_text,
-            "user_id": request.user_id,
-            "username": user_first_name,
-            "full_name": session.get_display_name(),
-            "timestamp": datetime.now().isoformat(),
-            "session_active": True,
-            "total_messages": session.total_messages,
-            "filtered": False
-        }
-        
+        enhanced = enhance_prompt_with_context(request.prompt, session)
+        session.add_message("user", enhanced)
+
+        response = client.chat('deepseek-v3.1:671b-cloud', messages=session.get_chat_context())
+        reply = response['message']['content']
+        session.add_message("assistant", reply)
+
+        return {"response": reply, "filtered": False, **_base_response(request, session)}
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Chat error: {e}")
-        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _base_response(request, session=None):
+    session = session or get_user_session(request.user_id)
+    return {
+        "user_id": request.user_id,
+        "username": session.get_first_name(),
+        "full_name": session.get_first_name(),
+        "timestamp": datetime.now().isoformat(),
+        "session_active": True,
+        "total_messages": session.total_messages
+    }
 
 @app.get("/session-info/{user_id}")
 async def get_session_info(user_id: str):
-    """Debug endpoint to check session state"""
-    if user_id in user_sessions:
-        session = user_sessions[user_id]
-        return {
-            "user_id": user_id,
-            "first_name": session.get_first_name(),
-            "total_messages": session.total_messages,
-            "context_length": len(session.chat_context),
-            "last_active": session.last_active.isoformat(),
-            "session_id": session.session_id
-        }
-    else:
+    session = user_sessions.get(user_id)
+    if not session:
         return {"error": "Session not found"}
+    return {
+        "user_id": user_id,
+        "first_name": session.get_first_name(),
+        "total_messages": session.total_messages,
+        "context_length": len(session.chat_context),
+        "last_active": session.last_active.isoformat()
+    }
 
-# Initialize embedded table on startup
 @app.on_event("startup")
 async def startup_event():
-    print("🚀 Initializing embedded tender table...")
+    print("Initializing embedded tender table...")
     embed_tender_table()
-    print("✅ Startup complete")
+    print("Startup complete")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    print("🚀 Starting B-Max AI Assistant...")
-    print("💬 Endpoint: POST /chat")
-    print("🔧 Health: GET /health")
-    print("🏢 Agencies: GET /agencies")  # NEW: Added agencies endpoint
-    print("🐛 Session Debug: GET /session-info/{user_id}")
-    print("📊 Database:", "Connected" if dynamodb else "Disconnected")
-    print("🤖 Ollama:", "Connected" if ollama_available else "Disconnected")
-    print(f"🌐 Server running on port {port}")
-    
+    print(f"Starting B-Max AI Assistant on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
