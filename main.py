@@ -80,7 +80,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory session storage with embedded table data
+# In-memory session storage
 user_sessions = {}
 embedded_tender_table = None
 last_table_update = None
@@ -90,7 +90,7 @@ class ChatRequest(BaseModel):
     prompt: str
     user_id: str = "guest"
 
-# --- Content Filtering System ---
+# --- Content Filter ---
 class ContentFilter:
     def __init__(self):
         self.inappropriate_keywords = [
@@ -146,7 +146,7 @@ class ContentFilter:
 
 content_filter = ContentFilter()
 
-# --- DynamoDB Helper Functions ---
+# --- DynamoDB Helpers ---
 def dd_to_py(item):
     if not item:
         return {}
@@ -227,7 +227,6 @@ def extract_document_links(tender):
             links.append({'type': 'Primary Document', 'url': link_value, 'is_primary': True})
         elif link_value and link_value not in ['', 'null', 'None']:
             links.append({'type': 'Primary Document', 'url': link_value, 'is_primary': True})
-
     link_fields = ['documentLink', 'documents', 'tenderDocuments', 'bidDocuments',
                    'attachmentLinks', 'relatedDocuments', 'document_url',
                    'bid_documents', 'tender_documents', 'attachments']
@@ -244,7 +243,6 @@ def extract_document_links(tender):
                 field_value = field_value.strip()
                 if field_value.startswith(('http://', 'https://')):
                     links.append({'type': field, 'url': field_value, 'is_primary': False})
-
     text_fields = ['description', 'title', 'additionalInfo', 'noticeDetails', 'details']
     for field in text_fields:
         if field in tender and tender[field]:
@@ -263,44 +261,46 @@ def format_tender_with_links(tender):
     agency = tender.get('sourceAgency', 'Unknown')
     closing_date = tender.get('closingDate', 'Unknown')
     status = tender.get('status', 'Unknown')
+
     document_links = extract_document_links(tender)
+    primary_links = [l for l in document_links if l.get('is_primary')]
+    secondary_links = [l for l in document_links if not l.get('is_primary')]
+
     formatted = f"**{title}**\n"
-    formatted += f"• **Reference**: {reference}\n"
+    formatted += f"• **Reference**: `{reference}`\n"
     formatted += f"• **Category**: {category}\n"
     formatted += f"• **Agency**: {agency}\n"
     formatted += f"• **Closing Date**: {closing_date}\n"
-    formatted += f"• **Status**: {status}\n"
-    if document_links:
-        primary_links = [link for link in document_links if link.get('is_primary')]
-        secondary_links = [link for link in document_links if not link.get('is_primary')]
-        formatted += f"• **Document Links**:\n"
-        for i, link_info in enumerate(primary_links, 1):
-            url = link_info['url']
-            formatted += f"  **PRIMARY DOCUMENT**: [Download Tender Documents]({url})\n"
-        for i, link_info in enumerate(secondary_links, len(primary_links) + 1):
-            link_type = link_info['type'].replace('_', ' ').title()
-            url = link_info['url']
-            formatted += f" {i}. [{link_type}]({url})\n"
+    formatted += f"• **Status**: {status}\n\n"
+
+    if primary_links or secondary_links:
+        formatted += "**Document Links**\n"
+        for link in primary_links:
+            url = link['url']
+            formatted += f"**PRIMARY DOCUMENT**: [Download Tender Documents]({url})\n"
+        for i, link in enumerate(secondary_links, 1):
+            link_type = link['type'].replace('_', ' ').title()
+            url = link['url']
+            formatted += f"{i}. [{link_type}]({url})\n"
+        formatted += "\n"
     else:
-        formatted += f"• **Document Links**: No direct links available\n"
+        formatted += "• **Document Links**: No direct links available\n\n"
+
     source_url = tender.get('sourceUrl')
     if source_url and source_url not in [l['url'] for l in document_links]:
         formatted += f"• **Source Page**: [View Original Tender]({source_url})\n"
+
+    formatted += "─" * 40 + "\n"
     return formatted
 
-# --- Agency Extraction ---
+# --- Agency & Embed ---
 def extract_available_agencies(tenders):
     global available_agencies
-    agencies = set()
-    for tender in tenders:
-        agency = tender.get('sourceAgency')
-        if agency and agency.strip():
-            agencies.add(agency.strip())
+    agencies = {t.get('sourceAgency', '').strip() for t in tenders if t.get('sourceAgency')}
     available_agencies = agencies
     print(f"Updated available agencies: {len(agencies)} agencies found")
     return agencies
 
-# --- Embed Table ---
 def embed_tender_table():
     global embedded_tender_table, last_table_update
     try:
@@ -311,15 +311,11 @@ def embed_tender_table():
         all_tenders = []
         last_evaluated_key = None
         while True:
-            if last_evaluated_key:
-                response = dynamodb.scan(TableName=DYNAMODB_TABLE_TENDERS, ExclusiveStartKey=last_evaluated_key)
-            else:
-                response = dynamodb.scan(TableName=DYNAMODB_TABLE_TENDERS)
-            items = response.get('Items', [])
+            resp = dynamodb.scan(TableName=DYNAMODB_TABLE_TENDERS, ExclusiveStartKey=last_evaluated_key) if last_evaluated_key else dynamodb.scan(TableName=DYNAMODB_TABLE_TENDERS)
+            items = resp.get('Items', [])
             for item in items:
-                tender = dd_to_py(item)
-                all_tenders.append(tender)
-            last_evaluated_key = response.get('LastEvaluatedKey')
+                all_tenders.append(dd_to_py(item))
+            last_evaluated_key = resp.get('LastEvaluatedKey')
             if not last_evaluated_key:
                 break
         embedded_tender_table = all_tenders
@@ -338,12 +334,8 @@ def get_embedded_table():
         return embed_tender_table()
     return embedded_tender_table
 
-# --- ADVANCED SEARCH ---
-def advanced_search(
-    user_prompt: str,
-    tenders: List[Dict[str, Any]],
-    user_preferences: Dict[str, Any],
-) -> List[Dict[str, Any]]:
+# --- Advanced Search ---
+def advanced_search(user_prompt: str, tenders: List[Dict], user_preferences: Dict) -> List[Dict]:
     prompt_low = user_prompt.lower()
     words = [w for w in prompt_low.split() if len(w) > 2]
     pref_cats = {c.lower() for c in user_preferences.get("preferredCategories", [])}
@@ -361,67 +353,34 @@ def advanced_search(
         score = 0
         reasons = []
 
-        # Agency match
         if any(a in agency for a in words) or any(a in prompt_low for a in agency.split()):
-            score += 30
-            reasons.append("Agency match")
+            score += 30; reasons.append("Agency match")
         elif words and any(difflib.SequenceMatcher(None, w, agency).ratio() > 0.7 for w in words):
-            score += 25
-            reasons.append("Fuzzy agency")
+            score += 25; reasons.append("Fuzzy agency")
 
-        # Category
-        if cat in pref_cats:
-            score += 15
-            reasons.append(f"Preferred category: {cat.title()}")
-        if any(w in cat for w in words):
-            score += 12
-            reasons.append("Category keyword")
+        if cat in pref_cats: score += 15; reasons.append(f"Preferred: {cat.title()}")
+        if any(w in cat for w in words): score += 12; reasons.append("Category keyword")
 
-        # Title
-        if any(w in title for w in words):
-            score += 10
-            reasons.append("Title keyword")
+        if any(w in title for w in words): score += 10; reasons.append("Title keyword")
         if words:
             best = max((difflib.SequenceMatcher(None, w, title).ratio() for w in words), default=0)
-            if best > 0.6:
-                score += int(best * 10)
-                reasons.append("Fuzzy title")
+            if best > 0.6: score += int(best * 10); reasons.append("Fuzzy title")
 
-        # Reference
-        if any(w in ref for w in words):
-            score += 8
-            reasons.append("Reference match")
+        if any(w in ref for w in words): score += 8; reasons.append("Reference match")
+        if desc and any(w in desc for w in words): score += 6; reasons.append("Description keyword")
+        if any(s in source_url for s in pref_sites): score += 7; reasons.append("Preferred source")
 
-        # Description
-        if desc and any(w in desc for w in words):
-            score += 6
-            reasons.append("Description keyword")
-
-        # Preferred site
-        if any(s in source_url for s in pref_sites):
-            score += 7
-            reasons.append("Preferred source")
-
-        # Document
         primary = [l for l in extract_document_links(tender) if l.get("is_primary")]
-        if primary:
-            score += 9
-            reasons.append("Has primary document")
-        elif extract_document_links(tender):
-            score += 3
-            reasons.append("Has document")
+        if primary: score += 9; reasons.append("Primary document")
+        elif extract_document_links(tender): score += 3; reasons.append("Has document")
 
-        # Urgency (ignore bad dates)
         cd = tender.get("closingDate", "")
         if cd and cd != "Unknown":
             try:
                 dt = datetime.fromisoformat(cd.replace("Z", "+00:00"))
-                days = (dt - datetime.now()).days
-                if 0 <= days <= 7:
-                    score += 5
-                    reasons.append("Closing soon")
-            except:
-                pass
+                if 0 <= (dt - datetime.now()).days <= 7:
+                    score += 5; reasons.append("Closing soon")
+            except: pass
 
         if score > 0:
             scored.append({"tender": tender, "score": score, "reasons": reasons})
@@ -433,73 +392,39 @@ def advanced_search(
 def format_embedded_table_for_ai(tenders, user_preferences=None):
     if not tenders:
         return "EMBEDDED PROCESSEDTENDER TABLE: No data available"
-    table_summary = "COMPLETE TENDER DATABASE CONTEXT (ONLY USE THIS DATA):\n\n"
-    total_tenders = len(tenders)
+    total = len(tenders)
+    with_links = sum(1 for t in tenders if extract_document_links(t))
     categories = {}
     agencies = {}
-    statuses = {}
-    tenders_with_links = 0
-    for tender in tenders:
-        category = tender.get('Category', 'Unknown')
-        agency = tender.get('sourceAgency', 'Unknown')
-        status = tender.get('status', 'Unknown')
-        categories[category] = categories.get(category, 0) + 1
+    for t in tenders:
+        cat = t.get('Category', 'Unknown')
+        agency = t.get('sourceAgency', 'Unknown')
+        categories[cat] = categories.get(cat, 0) + 1
         agencies[agency] = agencies.get(agency, 0) + 1
-        statuses[status] = statuses.get(status, 0) + 1
-        if extract_document_links(tender):
-            tenders_with_links += 1
-    table_summary += f"DATABASE OVERVIEW:\n"
-    table_summary += f"• Total Tenders: {total_tenders}\n"
-    table_summary += f"• Categories: {len(categories)}\n"
-    table_summary += f"• Agencies: {len(agencies)}\n"
-    table_summary += f"• Statuses: {len(statuses)}\n"
-    table_summary += f"• Tenders with Document Links: {tenders_with_links} ({tenders_with_links/total_tenders*100:.1f}%)\n\n"
+
+    summary = f"**TENDER DATABASE** ({total} tenders)\n\n"
+    summary += f"• **With Documents**: {with_links}\n"
+    summary += f"• **Categories**: {len(categories)}\n"
+    summary += f"• **Agencies**: {len(agencies)}\n\n"
+
     if available_agencies:
-        table_summary += "AVAILABLE TENDER SOURCE AGENCIES:\n"
-        agencies_list = sorted(list(available_agencies))
-        for i, agency in enumerate(agencies_list[:20]):
-            table_summary += f"• {agency}\n"
-        if len(agencies_list) > 20:
-            table_summary += f"• ... and {len(agencies_list) - 20} more agencies\n"
-        table_summary += "\n"
-    if user_preferences:
-        preferred_categories = user_preferences.get('preferredCategories', [])
-        preferred_sites = user_preferences.get('preferredSites', [])
-        if preferred_categories:
-            table_summary += f"USER PREFERENCES:\n"
-            table_summary += f"• Preferred Categories: {', '.join(preferred_categories)}\n"
-            if preferred_sites:
-                table_summary += f"• Preferred Sites: {len(preferred_sites)} sources\n"
-            table_summary += "\n"
-    table_summary += "TOP CATEGORIES:\n"
-    for category, count in sorted(categories.items(), key=lambda x: x[1], reverse=True)[:6]:
-        table_summary += f"• {category}: {count} tenders\n"
-    table_summary += "\n"
-    table_summary += "SAMPLE TENDERS WITH DOCUMENT LINKS:\n"
-    sample_count = 0
-    for tender in tenders:
-        if sample_count >= 6: break
-        document_links = extract_document_links(tender)
-        if document_links:
-            title = tender.get('title', 'No title')[:80] + '...' if len(tender.get('title', '')) > 80 else tender.get('title', 'No title')
-            category = tender.get('Category', 'Unknown')
-            agency = tender.get('sourceAgency', 'Unknown')
-            closing_date = tender.get('closingDate', 'Unknown')
-            status = tender.get('status', 'Unknown')
-            reference_number = tender.get('referenceNumber', 'N/A')
-            table_summary += f"{sample_count + 1}. {title}\n"
-            table_summary += f" {category} | {agency}\n"
-            table_summary += f" {closing_date} | {status}\n"
-            table_summary += f" {reference_number}\n"
-            primary_links = [link for link in document_links if link.get("is_primary")]
-            if primary_links:
-                table_summary += f" **Primary Document Available**: {len(primary_links)} link(s)\n"
-            table_summary += f" {len(document_links)} total document link(s)\n\n"
-            sample_count += 1
-    table_summary += "CRITICAL: ONLY USE DATA FROM THIS TABLE. NEVER INVENT TENDERS OR LINKS.\n"
-    table_summary += "IF NO MATCH: Say 'No matching tenders found in the database.'\n"
-    table_summary += "AGENCY AWARENESS: You can find tenders from ANY agency in the database.\n"
-    return table_summary
+        summary += "**Available Agencies**\n"
+        for a in sorted(list(available_agencies))[:15]:
+            summary += f"• {a}\n"
+        if len(available_agencies) > 15:
+            summary += f"• ...and {len(available_agencies)-15} more\n"
+        summary += "\n"
+
+    if user_preferences and user_preferences.get('preferredCategories'):
+        summary += f"**Your Preferred Categories**\n"
+        for c in user_preferences['preferredCategories']:
+            summary += f"• {c}\n"
+        summary += "\n"
+
+    summary += "**Top Categories**\n"
+    for cat, count in sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]:
+        summary += f"• {cat}: {count}\n"
+    return summary
 
 # --- Session Management ---
 class UserSession:
@@ -520,37 +445,38 @@ class UserSession:
     def initialize_chat_context(self, first_name: str):
         tenders = get_embedded_table()
         user_preferences = self.get_user_preferences()
-        table_context = format_embedded_table_for_ai(tenders, user_preferences) if tenders else "Tender database not available."
-        system_prompt = f"""You are B-Max, an AI assistant for TenderConnect.
+        table_context = format_embedded_table_for_ai(tenders, user_preferences) if tenders else "No data"
 
-YOU MAY ONLY USE THE EMBEDDED TENDER DATA BELOW. DO NOT USE ANY EXTERNAL KNOWLEDGE.
+        system_prompt = f"""You are B-Max, a helpful AI assistant for TenderConnect.
+
+TONE & STYLE:
+- Be warm, natural, and personal
+- Use the user's first name **{first_name}** when it feels right (e.g. first message, no results)
+- Do **not** start every message with "Hi {first_name}!"
+- Use emojis **only** in greetings or tips
+- **NEVER** use emojis in tender details
 
 CRITICAL RULES:
-1. ALWAYS address the user by their first name "{first_name}"
-2. NEVER say "I have access" or "I can search"
-3. ONLY answer using real tenders from the database
-4. IF NO TENDER MATCHES: Say "No matching tenders found in the database."
-5. **DOCUMENT LINKS**: Use ONLY the 'link' field. NEVER use sourceUrl for downloads.
-6. Format: [Download Tender Documents](EXACT_URL_FROM_LINK_FIELD)
-7. NEVER invent titles, references, agencies, or links
-8. Use exact field values: title, referenceNumber, Category, sourceAgency, closingDate, link
-9. Be concise, professional, and helpful
+1. **ONLY** use data from the embedded database below
+2. **NEVER** invent tenders, links, or details
+3. **Document links**: ONLY from `link` field → [Download Tender Documents](URL)
+4. **User preferences**: Prioritize preferred categories and sites
+5. If no match: Say "No matching tenders found" + helpful tip
 
-USER PROFILE:
+USER:
 - First Name: {first_name}
-- Preferred Categories: {', '.join(user_preferences.get('preferredCategories', [])) if user_preferences.get('preferredCategories') else 'Not specified'}
 - Company: {self.user_profile.get('companyName', 'Not specified') if self.user_profile else 'Not specified'}
 
-DATABASE CONTEXT (ONLY SOURCE OF TRUTH):
+DATABASE (ONLY SOURCE OF TRUTH):
 {table_context}
 
-RESPONSE RULES:
-- Only cite real tenders
-- If asked for documents → use 'link' field only
-- No generic advice
-- No external websites
-- No hallucinations
+RESPONSE FORMAT:
+- Natural conversation
+- Clean tender blocks
+- Use first name naturally
+- End with tip if no results
 """
+
         if not self.chat_context:
             self.chat_context = [{"role": "system", "content": system_prompt}]
         else:
@@ -667,42 +593,52 @@ def cleanup_old_sessions():
 def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
     tenders = get_embedded_table()
     user_preferences = session.get_user_preferences()
+    first_name = session.get_first_name()
+
     if not tenders:
-        database_context = "No tender data available."
-        personalized_context = ""
+        personalized_context = "No tender data available."
     else:
         search_results = advanced_search(user_prompt, tenders, user_preferences)
         if search_results:
-            personalized_context = "PERSONALIZED RECOMMENDATIONS (ONLY FROM DATABASE):\n\n"
-            for i, rec in enumerate(search_results, 1):
-                tender = rec["tender"]
+            count = len(search_results)
+            intro = f"I found **{count} matching tender{'s' if count != 1 else ''}** for you:\n\n"
+            personalized_context = intro + "**Recommended Tenders**\n\n"
+            for rec in search_results:
+                tender_formatted = format_tender_with_links(rec["tender"])
                 reasons = rec["reasons"]
-                tender_formatted = format_tender_with_links(tender)
-                personalized_context += f"{i}. {tender_formatted}\n"
+                personalized_context += tender_formatted
                 if reasons:
-                    personalized_context += f"   Why: {', '.join(reasons)}\n"
-                personalized_context += "\n"
+                    personalized_context += f"**Why this tender?** {', '.join(reasons)}\n\n"
+            personalized_context = personalized_context.strip()
         else:
-            personalized_context = "No matching tenders found in the database.\n"
-        database_context = format_embedded_table_for_ai(tenders, user_preferences)
-    user_first_name = session.get_first_name()
-    enhanced_prompt = f"""
-User: {user_first_name}
+            personalized_context = (
+                f"No matching tenders found, {first_name}.\n\n"
+                "Try searching with:\n"
+                "• Agency name (e.g., *City of Cape Town*)\n"
+                "• Reference number\n"
+                "• Category: *Construction*, *IT Services*\n\n"
+                "Example: _'construction Johannesburg'_"
+            )
+
+    database_context = format_embedded_table_for_ai(tenders, user_preferences) if tenders else "No data"
+
+    return f"""
+User: {first_name}
 Message: {user_prompt}
 
-DATABASE CONTEXT (ONLY SOURCE OF TRUTH):
+DATABASE:
 {database_context}
 
+RECOMMENDATIONS:
 {personalized_context}
 
 INSTRUCTIONS:
-- ONLY use data from above
-- NEVER invent tenders
-- If no match: "No matching tenders found"
-- Use exact field values
-- Document links: ONLY from 'link' field
+- Use ONLY data from DATABASE
+- Prioritize user preferences
+- Never invent tenders
+- Keep tender sections clean
+- Use first name naturally
 """
-    return enhanced_prompt
 
 # ========== API ENDPOINTS ==========
 @app.get("/")
