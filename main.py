@@ -338,7 +338,7 @@ def get_embedded_table():
         return embed_tender_table()
     return embedded_tender_table
 
-# --- ADVANCED SEARCH (NEW) ---
+# --- ADVANCED SEARCH ---
 def advanced_search(
     user_prompt: str,
     tenders: List[Dict[str, Any]],
@@ -361,7 +361,7 @@ def advanced_search(
         score = 0
         reasons = []
 
-        # Agency match (exact or fuzzy)
+        # Agency match
         if any(a in agency for a in words) or any(a in prompt_low for a in agency.split()):
             score += 30
             reasons.append("Agency match")
@@ -433,7 +433,7 @@ def advanced_search(
 def format_embedded_table_for_ai(tenders, user_preferences=None):
     if not tenders:
         return "EMBEDDED PROCESSEDTENDER TABLE: No data available"
-    table_summary = "COMPLETE TENDER DATABASE CONTEXT:\n\n"
+    table_summary = "COMPLETE TENDER DATABASE CONTEXT (ONLY USE THIS DATA):\n\n"
     total_tenders = len(tenders)
     categories = {}
     agencies = {}
@@ -491,13 +491,13 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
             table_summary += f" {category} | {agency}\n"
             table_summary += f" {closing_date} | {status}\n"
             table_summary += f" {reference_number}\n"
-            primary_links = [link for link in document_links if link.get('is_primary')]
+            primary_links = [link for link in document_links if link.get("is_primary")]
             if primary_links:
                 table_summary += f" **Primary Document Available**: {len(primary_links)} link(s)\n"
             table_summary += f" {len(document_links)} total document link(s)\n\n"
             sample_count += 1
-    table_summary += "You have access to all tender data.\n\n"
-    table_summary += "CRITICAL: Use 'link' field for downloads. NEVER use sourceUrl for documents.\n"
+    table_summary += "CRITICAL: ONLY USE DATA FROM THIS TABLE. NEVER INVENT TENDERS OR LINKS.\n"
+    table_summary += "IF NO MATCH: Say 'No matching tenders found in the database.'\n"
     table_summary += "AGENCY AWARENESS: You can find tenders from ANY agency in the database.\n"
     return table_summary
 
@@ -521,33 +521,36 @@ class UserSession:
         tenders = get_embedded_table()
         user_preferences = self.get_user_preferences()
         table_context = format_embedded_table_for_ai(tenders, user_preferences) if tenders else "Tender database not available."
-        system_prompt = f"""You are B-Max, an AI assistant for TenderConnect. You have complete access to the tender database.
+        system_prompt = f"""You are B-Max, an AI assistant for TenderConnect.
+
+YOU MAY ONLY USE THE EMBEDDED TENDER DATA BELOW. DO NOT USE ANY EXTERNAL KNOWLEDGE.
+
 CRITICAL RULES:
-1. ALWAYS address the user by their first name "{first_name}" in EVERY response
-2. NEVER introduce yourself or mention database access
-3. Provide natural, conversational responses
-4. Use the embedded database to give accurate information
-5. Focus on user's preferences and needs
-6. Format responses clearly with spacing and emojis
-7. Be warm, professional, and helpful
-8. **DOCUMENT LINKS**: ALWAYS use 'link' field in Markdown: [Download Tender Documents](URL)
-9. NEVER provide sourceUrl when asked for documents
-10. **SCOPE**: Only answer tender-related questions
-11. **AGENCY**: You can find tenders from ANY agency in the database
+1. ALWAYS address the user by their first name "{first_name}"
+2. NEVER say "I have access" or "I can search"
+3. ONLY answer using real tenders from the database
+4. IF NO TENDER MATCHES: Say "No matching tenders found in the database."
+5. **DOCUMENT LINKS**: Use ONLY the 'link' field. NEVER use sourceUrl for downloads.
+6. Format: [Download Tender Documents](EXACT_URL_FROM_LINK_FIELD)
+7. NEVER invent titles, references, agencies, or links
+8. Use exact field values: title, referenceNumber, Category, sourceAgency, closingDate, link
+9. Be concise, professional, and helpful
+
 USER PROFILE:
 - First Name: {first_name}
 - Preferred Categories: {', '.join(user_preferences.get('preferredCategories', [])) if user_preferences.get('preferredCategories') else 'Not specified'}
 - Company: {self.user_profile.get('companyName', 'Not specified') if self.user_profile else 'Not specified'}
-DATABASE CONTEXT:
+
+DATABASE CONTEXT (ONLY SOURCE OF TRUTH):
 {table_context}
-RESPONSE GUIDELINES:
-- Natural & conversational
-- Use line breaks
-- Personalize
-- Emojis sparingly
-- FOR DOCUMENT LINKS: Always clickable from 'link' field
-- FOR OUT-OF-SCOPE: Redirect to tender purpose
-- FOR AGENCY: Handle any agency in DB"""
+
+RESPONSE RULES:
+- Only cite real tenders
+- If asked for documents → use 'link' field only
+- No generic advice
+- No external websites
+- No hallucinations
+"""
         if not self.chat_context:
             self.chat_context = [{"role": "system", "content": system_prompt}]
         else:
@@ -670,7 +673,7 @@ def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
     else:
         search_results = advanced_search(user_prompt, tenders, user_preferences)
         if search_results:
-            personalized_context = "PERSONALIZED RECOMMENDATIONS:\n\n"
+            personalized_context = "PERSONALIZED RECOMMENDATIONS (ONLY FROM DATABASE):\n\n"
             for i, rec in enumerate(search_results, 1):
                 tender = rec["tender"]
                 reasons = rec["reasons"]
@@ -680,23 +683,24 @@ def enhance_prompt_with_context(user_prompt: str, session: UserSession) -> str:
                     personalized_context += f"   Why: {', '.join(reasons)}\n"
                 personalized_context += "\n"
         else:
-            personalized_context = ""
+            personalized_context = "No matching tenders found in the database.\n"
         database_context = format_embedded_table_for_ai(tenders, user_preferences)
     user_first_name = session.get_first_name()
     enhanced_prompt = f"""
 User: {user_first_name}
 Message: {user_prompt}
-DATABASE CONTEXT:
+
+DATABASE CONTEXT (ONLY SOURCE OF TRUTH):
 {database_context}
+
 {personalized_context}
+
 INSTRUCTIONS:
-- Respond naturally to {user_first_name}
-- Use database context
-- Personalize
-- Format clearly
-- Never mention DB
-- FOR DOCUMENT LINKS: Use 'link' field in Markdown
-- FOR AGENCY: Handle any agency in DB
+- ONLY use data from above
+- NEVER invent tenders
+- If no match: "No matching tenders found"
+- Use exact field values
+- Document links: ONLY from 'link' field
 """
     return enhanced_prompt
 
