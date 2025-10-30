@@ -265,15 +265,26 @@ def get_cognito_user_by_username(username: str):
 
 # --- Document Link Extraction Functions ---
 def extract_document_links(tender):
-    """Extract all document links from a tender"""
+    """Extract all document links from a tender - PRIORITIZE THE 'link' FIELD"""
     links = []
     
     # PRIMARY: Check the 'link' field first (this is the main document link)
     if 'link' in tender and tender['link']:
-        links.append({
-            'type': 'Document',
-            'url': tender['link']
-        })
+        # Validate it's a proper URL and not empty
+        link_value = tender['link'].strip()
+        if link_value and (link_value.startswith('http://') or link_value.startswith('https://')):
+            links.append({
+                'type': 'Primary Document',
+                'url': link_value,
+                'is_primary': True  # Mark this as the primary document link
+            })
+        elif link_value and link_value not in ['', 'null', 'None']:
+            # If it's not a full URL but has content, still include it
+            links.append({
+                'type': 'Primary Document',
+                'url': link_value,
+                'is_primary': True
+            })
     
     # SECONDARY: Check other common fields that might contain document links
     link_fields = ['documentLink', 'documents', 'tenderDocuments', 'bidDocuments', 
@@ -287,15 +298,21 @@ def extract_document_links(tender):
             if isinstance(field_value, list):
                 for item in field_value:
                     if isinstance(item, str) and item.strip():
-                        links.append({
-                            'type': field,
-                            'url': item.strip()
-                        })
+                        item = item.strip()
+                        if item.startswith(('http://', 'https://')):
+                            links.append({
+                                'type': field,
+                                'url': item,
+                                'is_primary': False
+                            })
             elif isinstance(field_value, str) and field_value.strip():
-                links.append({
-                    'type': field,
-                    'url': field_value.strip()
-                })
+                field_value = field_value.strip()
+                if field_value.startswith(('http://', 'https://')):
+                    links.append({
+                        'type': field,
+                        'url': field_value,
+                        'is_primary': False
+                    })
     
     # TERTIARY: Also check for links in description or other text fields
     text_fields = ['description', 'title', 'additionalInfo', 'noticeDetails', 'details']
@@ -310,13 +327,14 @@ def extract_document_links(tender):
                 if link not in [l['url'] for l in links]:
                     links.append({
                         'type': f'found_in_{field}',
-                        'url': link
+                        'url': link,
+                        'is_primary': False
                     })
     
     return links
 
 def format_tender_with_links(tender):
-    """Format tender information with proper document links"""
+    """Format tender information with proper document links - EMPHASIZE PRIMARY LINK"""
     title = tender.get('title', 'No title')
     reference = tender.get('referenceNumber', 'N/A')
     category = tender.get('Category', 'Unknown')
@@ -335,8 +353,19 @@ def format_tender_with_links(tender):
     formatted += f"• **Status**: {status}\n"
     
     if document_links:
+        # Find primary link (from 'link' field)
+        primary_links = [link for link in document_links if link.get('is_primary')]
+        secondary_links = [link for link in document_links if not link.get('is_primary')]
+        
         formatted += f"• **Document Links**:\n"
-        for i, link_info in enumerate(document_links, 1):
+        
+        # Show primary link first and emphasize it
+        for i, link_info in enumerate(primary_links, 1):
+            url = link_info['url']
+            formatted += f"  🎯 **PRIMARY DOCUMENT**: [Download Tender Documents]({url})\n"
+        
+        # Show secondary links
+        for i, link_info in enumerate(secondary_links, len(primary_links) + 1):
             link_type = link_info['type'].replace('_', ' ').title()
             url = link_info['url']
             formatted += f"  {i}. [{link_type}]({url})\n"
@@ -537,11 +566,22 @@ def format_embedded_table_for_ai(tenders, user_preferences=None):
             table_summary += f"   📊 {category} | 🏢 {agency}\n"
             table_summary += f"   📅 {closing_date} | 📈 {status}\n"
             table_summary += f"   🏷️ {reference_number}\n"
-            table_summary += f"   🔗 {len(document_links)} document link(s) available\n\n"
+            
+            # Show primary document link prominently
+            primary_links = [link for link in document_links if link.get('is_primary')]
+            if primary_links:
+                table_summary += f"   🎯 **Primary Document Available**: {len(primary_links)} direct download link(s)\n"
+            table_summary += f"   🔗 {len(document_links)} total document link(s) available\n\n"
             sample_count += 1
     
     table_summary += "💡 You have access to all tender data including titles, references, categories, agencies, closing dates, contacts, and document links."
     table_summary += "\n\n📝 CRITICAL INSTRUCTION FOR DOCUMENT LINKS: When users ask for document links or tender documents, ALWAYS provide the actual clickable URLs from the 'link' field in Markdown format like [Download Document PDF](https://example.com/document.pdf). The 'link' field contains the actual document PDF/attachment, while 'sourceUrl' is just the tender information page. Always prioritize the 'link' field for document downloads."
+    table_summary += "\n\n🚨 URGENT DOCUMENT LINK POLICY:"
+    table_summary += "\n1. ALWAYS use the actual 'link' field value from the database for document downloads"
+    table_summary += "\n2. NEVER provide agency website links or source URLs when users ask for documents"
+    table_summary += "\n3. The 'link' field contains the direct document download, NOT the agency page"
+    table_summary += "\n4. Format document links as: [Download Tender Documents](ACTUAL_LINK_FROM_DATABASE)"
+    table_summary += "\n5. If no 'link' field exists, say 'No direct document link available'"
     
     # NEW: Add agency awareness instruction
     table_summary += "\n\n🏢 AGENCY AWARENESS: You can find tenders from ANY agency in the database. When users ask for tenders from specific agencies, check the available agencies list above and provide relevant tenders regardless of which agency they're from. The system automatically detects all available agencies from the database."
@@ -584,7 +624,12 @@ def get_personalized_recommendations(user_prompt: str, tenders: list, user_prefe
             match_reasons.append("Matches your search query")
         
         # Document link availability (bonus for tenders with documents)
-        if extract_document_links(tender):
+        document_links = extract_document_links(tender)
+        primary_links = [link for link in document_links if link.get('is_primary')]
+        if primary_links:
+            score += 5  # Higher bonus for primary document links
+            match_reasons.append("Has direct document download links")
+        elif document_links:
             score += 2
             match_reasons.append("Has document links available")
         
@@ -647,9 +692,10 @@ CRITICAL RULES - FOLLOW THESE EXACTLY:
 5. Focus on the user's preferences and needs
 6. Format responses clearly with proper spacing and emojis for readability
 7. Be warm, professional, and helpful
-8. **CRITICAL FOR DOCUMENT LINKS**: When providing document links, ALWAYS include actual clickable URLs from the 'link' field in Markdown format like [Download Document PDF](https://example.com/document.pdf). The 'link' field contains the actual document, while 'sourceUrl' is just the information page.
-9. **SCOPE LIMITATION**: If a question is completely outside the scope of tenders, business opportunities, or general assistance, respond with: "I'm sorry, but I'm specifically designed to assist with tender-related questions and business opportunities through TenderConnect. I can help you find tender information, document links, categories, and recommendations."
-10. **AGENCY AWARENESS**: You can find tenders from ANY agency in the database. When users mention specific agencies, use the available agencies list to provide relevant tenders. The system automatically detects all agencies from the database.
+8. **CRITICAL FOR DOCUMENT LINKS**: When providing document links, ALWAYS include actual clickable URLs from the 'link' field in Markdown format like [Download Tender Documents](https://example.com/document.pdf). The 'link' field contains the actual document PDF/attachment, while 'sourceUrl' is just the tender information page. Always prioritize the 'link' field for document downloads.
+9. **DOCUMENT LINK POLICY**: ALWAYS provide the actual 'link' field value from the database. NEVER provide agency website links or source URLs when users ask for documents. The 'link' field contains the direct document download.
+10. **SCOPE LIMITATION**: If a question is completely outside the scope of tenders, business opportunities, or general assistance, respond with: "I'm sorry, but I'm specifically designed to assist with tender-related questions and business opportunities through TenderConnect. I can help you find tender information, document links, categories, and recommendations."
+11. **AGENCY AWARENESS**: You can find tenders from ANY agency in the database. When users mention specific agencies, use the available agencies list to provide relevant tenders. The system automatically detects all agencies from the database.
 
 USER PROFILE:
 - First Name: {first_name}
@@ -667,6 +713,7 @@ RESPONSE GUIDELINES:
 - Use emojis sparingly to enhance readability
 - Never mention your capabilities or database access
 - **FOR DOCUMENT LINKS**: Always provide clickable URLs from the 'link' field, not just descriptions
+- **FOR DOCUMENT REQUESTS**: ALWAYS use the actual 'link' field value - never provide agency websites
 - **FOR OUT-OF-SCOPE QUESTIONS**: Politely redirect to your purpose as a tender assistant
 - **FOR AGENCY REQUESTS**: You can handle requests for tenders from ANY agency that exists in the database"""
 
@@ -883,6 +930,7 @@ INSTRUCTIONS:
 - Never mention database access or your capabilities
 - Focus on being helpful and conversational
 - FOR DOCUMENT LINKS: Always provide actual clickable URLs from the 'link' field in Markdown format
+- FOR DOCUMENT REQUESTS: ALWAYS use the actual 'link' field value - never provide agency websites
 - FOR OUT-OF-SCOPE QUESTIONS: If the question is completely unrelated to tenders or business, politely explain your purpose as a tender assistant
 - FOR AGENCY REQUESTS: You can handle tenders from ANY agency in the database - use the available agencies list
 """
